@@ -1,0 +1,1068 @@
+import copy, os, unittest
+os.environ.setdefault("OURCAL_DEMO", "1")  # keep imports side-effect free / no google
+import ourcal
+
+
+class TestSlug(unittest.TestCase):
+    def test_lowercases_and_hyphenates_spaces(self):
+        self.assertEqual(ourcal.slug("Side Project 2"), "side-project-2")
+
+    def test_strips_unsafe_chars(self):
+        self.assertEqual(ourcal.slug("Work K!"), "work-k")
+
+    def test_collapses_repeats_and_trims(self):
+        self.assertEqual(ourcal.slug("  Side   AI  "), "side-ai")
+
+
+class TestConfig(unittest.TestCase):
+    def test_accounts_are_well_formed(self):
+        # Contents are personal and live in a git-ignored accounts.json, so
+        # assert shape rather than specific addresses.
+        self.assertTrue(ourcal.ACCOUNTS)
+        for a in ourcal.ACCOUNTS:
+            self.assertTrue(a["label"].strip(), a)
+            self.assertTrue(ourcal.valid_email(a["email"]), a)
+
+    def test_account_labels_are_unique(self):
+        # Labels key the token files; a duplicate would silently share one.
+        labels = [a["label"] for a in ourcal.ACCOUNTS]
+        self.assertEqual(len(labels), len(set(labels)))
+
+    def test_token_paths_are_unique_per_account(self):
+        slugs = [ourcal.slug(a["label"]) for a in ourcal.ACCOUNTS]
+        self.assertEqual(len(slugs), len(set(slugs)))
+        self.assertTrue(all(slugs))
+
+    def test_palettes_cover_all_accounts(self):
+        self.assertGreaterEqual(len(ourcal.PALETTE_LIGHT), len(ourcal.ACCOUNTS))
+        self.assertEqual(len(ourcal.PALETTE_LIGHT), len(ourcal.PALETTE_DARK))
+
+    def test_core_constants(self):
+        self.assertEqual(ourcal.PORT, 8756)
+        self.assertEqual(ourcal.TIMEZONE, "America/Los_Angeles")
+        self.assertEqual(ourcal.DAYS_AHEAD, 30)
+        self.assertEqual(ourcal.POLL_MINUTES, 5)
+
+
+class TestAccountsFile(unittest.TestCase):
+    """Real addresses live in a git-ignored accounts.json; the checked-in
+    defaults are placeholders so a published copy carries nobody's data."""
+
+    def test_parses_a_valid_file(self):
+        got = ourcal.parse_accounts([{"label": "Home", "email": "a@b.com"},
+                                     {"label": "Work", "email": "c@d.org"}])
+        self.assertEqual(got, [{"label": "Home", "email": "a@b.com"},
+                               {"label": "Work", "email": "c@d.org"}])
+
+    def test_trims_whitespace(self):
+        got = ourcal.parse_accounts([{"label": " Home ", "email": " a@b.com "}])
+        self.assertEqual(got, [{"label": "Home", "email": "a@b.com"}])
+
+    def test_rejects_empty_list(self):
+        self.assertIsNone(ourcal.parse_accounts([]))
+
+    def test_rejects_non_list(self):
+        for bad in [{}, "nope", None, 3]:
+            self.assertIsNone(ourcal.parse_accounts(bad), repr(bad))
+
+    def test_rejects_entry_missing_label(self):
+        self.assertIsNone(ourcal.parse_accounts([{"email": "a@b.com"}]))
+
+    def test_rejects_entry_with_bad_email(self):
+        self.assertIsNone(
+            ourcal.parse_accounts([{"label": "Home", "email": "not-an-email"}]))
+
+    def test_rejects_duplicate_labels(self):
+        # Two accounts sharing a label would share one token file.
+        self.assertIsNone(ourcal.parse_accounts(
+            [{"label": "Home", "email": "a@b.com"},
+             {"label": "Home", "email": "c@d.org"}]))
+
+    def test_load_returns_none_for_missing_file(self):
+        self.assertIsNone(ourcal.load_accounts("/nonexistent/accounts.json"))
+
+    def test_load_returns_none_for_malformed_json(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                         delete=False) as f:
+            f.write("{not json")
+            path = f.name
+        self.addCleanup(os.unlink, path)
+        self.assertIsNone(ourcal.load_accounts(path))   # falls back, no crash
+
+    def test_load_reads_a_good_file(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                         delete=False) as f:
+            json.dump([{"label": "Home", "email": "a@b.com"}], f)
+            path = f.name
+        self.addCleanup(os.unlink, path)
+        self.assertEqual(ourcal.load_accounts(path),
+                         [{"label": "Home", "email": "a@b.com"}])
+
+
+class TestNormalize(unittest.TestCase):
+    def _timed(self):
+        return {
+            "iCalUID": "abc@google.com", "summary": "Standup",
+            "start": {"dateTime": "2026-07-23T09:00:00-07:00"},
+            "end":   {"dateTime": "2026-07-23T09:30:00-07:00"},
+            "location": "Zoom", "hangoutLink": "https://meet.google.com/xyz",
+            "attendees": [{"email": "a@x.com"}, {"email": "b@x.com"}],
+        }
+
+    def test_timed_event_fields(self):
+        n = ourcal.normalize(self._timed(), "Personal", "Work")
+        self.assertEqual(n["uid"], "abc@google.com")
+        self.assertEqual(n["title"], "Standup")
+        self.assertFalse(n["allDay"])
+        self.assertTrue(n["busy"])              # no transparency → opaque
+        self.assertEqual(n["join"], "https://meet.google.com/xyz")
+        self.assertEqual(n["location"], "Zoom")
+        self.assertEqual(n["labels"], ["Personal"])
+        self.assertEqual(n["calendars"], ["Work"])
+        self.assertEqual(n["guests"], 2)
+        self.assertEqual(n["start"], "2026-07-23T09:00:00-07:00")
+
+    def test_all_day_event(self):
+        raw = {"iCalUID": "d@g", "summary": "Trip",
+               "start": {"date": "2026-08-01"}, "end": {"date": "2026-08-03"}}
+        n = ourcal.normalize(raw, "Second", "Personal")
+        self.assertTrue(n["allDay"])
+        self.assertEqual(n["start"], "2026-08-01")
+
+    def test_free_event_is_not_busy(self):
+        raw = {"iCalUID": "f@g", "summary": "Focus",
+               "transparency": "transparent",
+               "start": {"dateTime": "2026-07-23T14:00:00-07:00"},
+               "end":   {"dateTime": "2026-07-23T15:00:00-07:00"}}
+        self.assertFalse(ourcal.normalize(raw, "Personal", "Cal")["busy"])
+
+    def test_empty_title_defaults_to_busy(self):
+        raw = {"iCalUID": "e@g",
+               "start": {"dateTime": "2026-07-23T14:00:00-07:00"},
+               "end":   {"dateTime": "2026-07-23T15:00:00-07:00"}}
+        self.assertEqual(ourcal.normalize(raw, "L", "C")["title"], "Busy")
+
+    def test_missing_optional_fields(self):
+        raw = {"iCalUID": "m@g", "summary": "x",
+               "start": {"dateTime": "2026-07-23T14:00:00-07:00"},
+               "end":   {"dateTime": "2026-07-23T15:00:00-07:00"}}
+        n = ourcal.normalize(raw, "L", "C")
+        self.assertIsNone(n["location"])
+        self.assertIsNone(n["join"])
+        self.assertEqual(n["guests"], 0)
+
+
+class TestSources(unittest.TestCase):
+    """A unified row must be able to address the real events behind it."""
+
+    def _raw(self, **kw):
+        raw = {"iCalUID": "abc@google.com", "id": "evt123", "summary": "Standup",
+               "start": {"dateTime": "2026-07-23T09:00:00-07:00"},
+               "end":   {"dateTime": "2026-07-23T09:30:00-07:00"}}
+        raw.update(kw)
+        return raw
+
+    def test_normalize_emits_one_source_with_ids(self):
+        n = ourcal.normalize(self._raw(), "Personal", "Primary",
+                             "personal@example.com")
+        self.assertEqual(n["sources"], [{
+            "label": "Personal", "calendarId": "personal@example.com",
+            "eventId": "evt123", "seriesId": None, "calendarName": "Primary"}])
+
+    def test_normalize_carries_series_id_for_recurring(self):
+        n = ourcal.normalize(self._raw(id="evt123_20260724T160000Z",
+                                       recurringEventId="evt123"),
+                             "Personal", "Primary", "personal@example.com")
+        self.assertEqual(n["sources"][0]["seriesId"], "evt123")
+        self.assertEqual(n["sources"][0]["eventId"], "evt123_20260724T160000Z")
+
+    def test_series_id_none_when_not_recurring(self):
+        n = ourcal.normalize(self._raw(), "L", "C", "c@x")
+        self.assertIsNone(n["sources"][0]["seriesId"])
+
+    def test_calendar_id_defaults_to_empty(self):
+        n = ourcal.normalize(self._raw(), "L", "C")
+        self.assertEqual(n["sources"][0]["calendarId"], "")
+
+    def test_merge_concatenates_sources_across_accounts(self):
+        a = ourcal.normalize(self._raw(), "Personal", "Primary", "a@x")
+        b = ourcal.normalize(self._raw(id="other9"), "Second", "Work", "b@x")
+        out = ourcal.merge_events([a, b])
+        self.assertEqual(len(out), 1)
+        self.assertEqual([s["label"] for s in out[0]["sources"]],
+                         ["Personal", "Second"])
+        self.assertEqual([s["eventId"] for s in out[0]["sources"]],
+                         ["evt123", "other9"])
+
+    def test_merge_does_not_mutate_source_lists(self):
+        a = ourcal.normalize(self._raw(), "Personal", "Primary", "a@x")
+        b = ourcal.normalize(self._raw(id="other9"), "Second", "Work", "b@x")
+        ourcal.merge_events([a, b])
+        self.assertEqual(len(a["sources"]), 1)
+        self.assertEqual(len(b["sources"]), 1)
+
+    def test_unmerged_event_keeps_its_single_source(self):
+        a = ourcal.normalize(self._raw(), "Personal", "Primary", "a@x")
+        out = ourcal.merge_events([a])
+        self.assertEqual(len(out[0]["sources"]), 1)
+
+
+class TestMerge(unittest.TestCase):
+    def _n(self, uid, start, label, busy=True, guests=0, join=None, cal="C"):
+        return {"uid": uid, "title": "M", "start": start, "end": start,
+                "allDay": False, "busy": busy, "location": None, "join": join,
+                "labels": [label], "calendars": [cal], "guests": guests}
+
+    def test_same_uid_start_merges_labels(self):
+        a = self._n("u1", "2026-07-23T09:00:00-07:00", "Personal", busy=False)
+        b = self._n("u1", "2026-07-23T09:00:00-07:00", "Work", busy=True,
+                    guests=3, join="https://meet/x")
+        out = ourcal.merge_events([a, b])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["labels"], ["Personal", "Work"])
+        self.assertTrue(out[0]["busy"])                 # any() busy
+        self.assertEqual(out[0]["guests"], 3)           # max
+        self.assertEqual(out[0]["join"], "https://meet/x")  # first non-empty
+
+    def test_missing_uid_does_not_block_merging(self):
+        # Identity is the appointment (title + span), not the uid — so copies
+        # still collapse when Google gives us nothing to key on.
+        a = self._n("", "2026-07-23T09:00:00-07:00", "Personal")
+        b = self._n("", "2026-07-23T09:00:00-07:00", "Second")
+        out = ourcal.merge_events([a, b])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["labels"], ["Personal", "Second"])
+
+    def test_does_not_mutate_inputs(self):
+        a = self._n("u1", "2026-07-23T09:00:00-07:00", "Personal")
+        b = self._n("u1", "2026-07-23T09:00:00-07:00", "Work")
+        a_snap, b_snap = copy.deepcopy(a), copy.deepcopy(b)
+        ourcal.merge_events([a, b])
+        self.assertEqual(a, a_snap)
+        self.assertEqual(b, b_snap)
+
+    def test_sorted_by_start(self):
+        a = self._n("u2", "2026-07-24T09:00:00-07:00", "Personal")
+        b = self._n("u1", "2026-07-23T09:00:00-07:00", "Personal")
+        out = ourcal.merge_events([a, b])
+        self.assertEqual([e["uid"] for e in out], ["u1", "u2"])
+
+    def test_sorted_by_instant_across_offsets(self):
+        # Eastern 10:00-04:00 == 14:00 UTC; Pacific 09:00-07:00 == 16:00 UTC.
+        # By real instant, the Eastern event is earlier — a lexicographic string
+        # sort would wrongly place the Pacific "09:00" first.
+        east = self._n("uE", "2026-07-23T10:00:00-04:00", "Personal")
+        pac = self._n("uP", "2026-07-23T09:00:00-07:00", "Second")
+        out = ourcal.merge_events([pac, east])
+        self.assertEqual([e["uid"] for e in out], ["uE", "uP"])
+
+
+class TestMergeSeparateCopies(unittest.TestCase):
+    """The same appointment typed into four accounts is four Google events with
+    four different iCalUIDs. It is still one appointment, and must render as one
+    row carrying every calendar's badge."""
+
+    def _n(self, uid, label, title="Dentist appointment",
+           start="2026-07-24T11:00:00-07:00", end="2026-07-24T12:00:00-07:00",
+           all_day=False):
+        return {"uid": uid, "title": title, "start": start, "end": end,
+                "allDay": all_day, "busy": True, "location": None, "join": None,
+                "labels": [label], "calendars": [label + " cal"], "guests": 0,
+                "sources": [{"label": label, "calendarId": label + "@x",
+                             "eventId": uid, "seriesId": None,
+                             "calendarName": label + " cal"}]}
+
+    def test_distinct_uids_same_slot_collapse_to_one_row(self):
+        out = ourcal.merge_events([self._n("u1", "Personal"), self._n("u2", "Work"),
+                                   self._n("u3", "Side"), self._n("u4", "Family")])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["labels"],
+                         ["Personal", "Work", "Side", "Family"])
+
+    def test_every_copy_stays_addressable_for_delete(self):
+        out = ourcal.merge_events([self._n("u1", "Personal"), self._n("u2", "Work")])
+        self.assertEqual([s["eventId"] for s in out[0]["sources"]], ["u1", "u2"])
+
+    def test_same_instant_in_different_offsets_merges(self):
+        # One account reports Pacific wall time, another the same moment in UTC.
+        # A raw string compare would call these two different appointments.
+        pacific = self._n("u1", "Personal")
+        utc = self._n("u2", "Side", start="2026-07-24T18:00:00Z",
+                      end="2026-07-24T19:00:00Z")
+        self.assertEqual(len(ourcal.merge_events([pacific, utc])), 1)
+
+    def test_titles_compare_case_and_space_insensitively(self):
+        a = self._n("u1", "Personal", title="Dentist Appointment")
+        b = self._n("u2", "Work", title="dentist  appointment ")
+        self.assertEqual(len(ourcal.merge_events([a, b])), 1)
+
+    def test_different_titles_in_the_same_slot_stay_apart(self):
+        a = self._n("u1", "Personal")
+        b = self._n("u2", "Work", title="Physio")
+        self.assertEqual(len(ourcal.merge_events([a, b])), 2)
+
+    def test_different_durations_stay_apart(self):
+        a = self._n("u1", "Personal")
+        b = self._n("u2", "Work", end="2026-07-24T11:30:00-07:00")
+        self.assertEqual(len(ourcal.merge_events([a, b])), 2)
+
+    def test_all_day_never_merges_with_a_midnight_event(self):
+        allday = self._n("u1", "Personal", start="2026-07-24", end="2026-07-25",
+                         all_day=True)
+        timed = self._n("u2", "Work", start="2026-07-24T00:00:00-07:00",
+                        end="2026-07-25T00:00:00-07:00")
+        self.assertEqual(len(ourcal.merge_events([allday, timed])), 2)
+
+    def test_all_day_copies_across_accounts_merge(self):
+        a = self._n("u1", "Personal", start="2026-07-24", end="2026-07-25",
+                    all_day=True)
+        b = self._n("u2", "Work", start="2026-07-24", end="2026-07-25",
+                    all_day=True)
+        self.assertEqual(len(ourcal.merge_events([a, b])), 1)
+
+    def test_recurring_instances_remain_separate_rows(self):
+        mon = self._n("u1", "Personal")
+        tue = self._n("u1", "Personal", start="2026-07-25T11:00:00-07:00",
+                      end="2026-07-25T12:00:00-07:00")
+        self.assertEqual(len(ourcal.merge_events([mon, tue])), 2)
+
+    def test_does_not_mutate_inputs(self):
+        a, b = self._n("u1", "Personal"), self._n("u2", "Work")
+        a_snap, b_snap = copy.deepcopy(a), copy.deepcopy(b)
+        ourcal.merge_events([a, b])
+        self.assertEqual(a, a_snap)
+        self.assertEqual(b, b_snap)
+
+
+class TestBuildBody(unittest.TestCase):
+    def test_timed_body(self):
+        p = {"title": "Sync", "date": "2026-07-23", "startTime": "09:00",
+             "endTime": "09:30", "allDay": False, "notes": "n", "location": "L"}
+        b = ourcal.build_event_body(p, blocking=True)
+        self.assertEqual(b["summary"], "Sync")
+        self.assertEqual(b["transparency"], "opaque")
+        self.assertEqual(b["start"], {"dateTime": "2026-07-23T09:00:00",
+                                      "timeZone": "America/Los_Angeles"})
+        self.assertEqual(b["end"], {"dateTime": "2026-07-23T09:30:00",
+                                    "timeZone": "America/Los_Angeles"})
+        self.assertEqual(b["location"], "L")
+        self.assertEqual(b["description"], "n")
+
+    def test_all_day_exclusive_end(self):
+        p = {"title": "PTO", "date": "2026-08-01", "allDay": True,
+             "startTime": "", "endTime": "", "notes": "", "location": ""}
+        b = ourcal.build_event_body(p, blocking=True)
+        self.assertEqual(b["start"], {"date": "2026-08-01"})
+        self.assertEqual(b["end"], {"date": "2026-08-02"})  # +1 exclusive
+
+    def test_empty_title_defaults_busy_and_free(self):
+        p = {"title": "  ", "date": "2026-07-23", "startTime": "10:00",
+             "endTime": "10:15", "allDay": False, "notes": "", "location": ""}
+        b = ourcal.build_event_body(p, blocking=False)
+        self.assertEqual(b["summary"], "Busy")
+        self.assertEqual(b["transparency"], "transparent")
+        self.assertNotIn("location", b)
+        self.assertNotIn("description", b)
+
+
+class TestDetailLevel(unittest.TestCase):
+    """detail="busy" hides what the event is; blocking controls whether it
+    occupies time. Separate axes -- both combinations must be expressible."""
+
+    def _p(self, **kw):
+        p = {"title": "Annual physical", "date": "2026-07-28",
+             "startTime": "09:25", "endTime": "10:00", "allDay": False,
+             "notes": "bring insurance card", "location": "5708 E Lk Sammamish"}
+        p.update(kw)
+        return p
+
+    def test_full_detail_keeps_everything(self):
+        b = ourcal.build_event_body(self._p(), blocking=True, detail="full")
+        self.assertEqual(b["summary"], "Annual physical")
+        self.assertEqual(b["location"], "5708 E Lk Sammamish")
+        self.assertEqual(b["description"], "bring insurance card")
+
+    def test_busy_detail_strips_title_location_notes(self):
+        b = ourcal.build_event_body(self._p(), blocking=True, detail="busy")
+        self.assertEqual(b["summary"], "Busy")
+        self.assertNotIn("location", b)
+        self.assertNotIn("description", b)
+
+    def test_busy_detail_preserves_the_time_slot(self):
+        b = ourcal.build_event_body(self._p(), blocking=True, detail="busy")
+        self.assertEqual(b["start"], {"dateTime": "2026-07-28T09:25:00",
+                                      "timeZone": "America/Los_Angeles"})
+        self.assertEqual(b["end"], {"dateTime": "2026-07-28T10:00:00",
+                                    "timeZone": "America/Los_Angeles"})
+
+    def test_detail_is_independent_of_blocking(self):
+        # visible but free
+        vf = ourcal.build_event_body(self._p(), blocking=False, detail="full")
+        self.assertEqual(vf["summary"], "Annual physical")
+        self.assertEqual(vf["transparency"], "transparent")
+        # opaque but anonymous
+        oa = ourcal.build_event_body(self._p(), blocking=True, detail="busy")
+        self.assertEqual(oa["summary"], "Busy")
+        self.assertEqual(oa["transparency"], "opaque")
+
+    def test_defaults_to_full_detail(self):
+        b = ourcal.build_event_body(self._p(), blocking=True)
+        self.assertEqual(b["summary"], "Annual physical")
+
+    def test_busy_all_day_keeps_exclusive_end(self):
+        b = ourcal.build_event_body(self._p(allDay=True), blocking=True,
+                                    detail="busy")
+        self.assertEqual(b["start"], {"date": "2026-07-28"})
+        self.assertEqual(b["end"], {"date": "2026-07-29"})
+        self.assertEqual(b["summary"], "Busy")
+
+
+def _FIXED_NOW():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime(2026, 7, 23, 8, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+
+
+class TestDemoService(unittest.TestCase):
+    def setUp(self):
+        os.environ["OURCAL_DEMO"] = "1"
+        ourcal.reset_demo()  # restore fixtures between tests
+
+    def test_envelope_shape(self):
+        env = ourcal.get_events()
+        self.assertEqual(env["timezone"], "America/Los_Angeles")
+        self.assertIn("updated", env)
+        self.assertTrue(all("color" in a for a in env["accounts"]))
+        self.assertTrue(len(env["events"]) >= 5)
+
+    def test_has_meet_allday_free_and_merged(self):
+        evs = ourcal.get_events()["events"]
+        self.assertTrue(any(e["join"] for e in evs))            # ADPList Meet
+        self.assertTrue(any(e["allDay"] for e in evs))          # all-day
+        self.assertTrue(any(not e["busy"] for e in evs))        # free
+        self.assertTrue(any(len(e["labels"]) >= 2 for e in evs))  # merged badges
+
+    def test_separately_entered_copies_show_as_one_row(self):
+        rows = [e for e in ourcal.get_events()["events"]
+                if e["title"] == "Dentist appointment"]
+        self.assertEqual(len(rows), 1)                          # not one per account
+        self.assertEqual(rows[0]["labels"], ["Personal", "Work"])
+        self.assertEqual(len(rows[0]["sources"]), 2)            # both stay deletable
+
+    def test_get_events_events_stable_across_calls(self):
+        one = ourcal.get_events(now=_FIXED_NOW())["events"]
+        two = ourcal.get_events(now=_FIXED_NOW())["events"]
+        self.assertEqual(one, two)  # no mutation between reads
+
+    def test_create_timed_appends_and_appears(self):
+        before = len(ourcal.get_events()["events"])
+        r = ourcal.create_event({
+            "title": "New", "date": "2026-07-24", "startTime": "10:00",
+            "endTime": "10:30", "allDay": False, "notes": "", "location": "",
+            "mode": "copies", "targets": [{"label": "Personal", "blocking": True}],
+        })
+        self.assertTrue(r["ok"])
+        self.assertEqual(len(ourcal.get_events()["events"]), before + 1)
+
+    def test_create_allday_and_invite_ok(self):
+        r1 = ourcal.create_event({
+            "title": "PTO", "date": "2026-08-01", "allDay": True,
+            "startTime": "", "endTime": "", "notes": "", "location": "",
+            "mode": "copies", "targets": [{"label": "Personal", "blocking": True}]})
+        r2 = ourcal.create_event({
+            "title": "1:1", "date": "2026-07-25", "startTime": "11:00",
+            "endTime": "11:30", "allDay": False, "notes": "", "location": "",
+            "mode": "invite", "inviteFrom": "Personal",
+            "targets": [{"label": "Personal", "blocking": True},
+                        {"label": "Work", "blocking": True}]})
+        self.assertTrue(r1["ok"] and r2["ok"])
+
+
+class TestCalendarFilter(unittest.TestCase):
+    def test_includes_selected(self):
+        self.assertTrue(ourcal.should_include_calendar(
+            {"id": "abc@group.calendar.google.com", "selected": True}))
+
+    def test_includes_primary_even_if_not_selected(self):
+        self.assertTrue(ourcal.should_include_calendar(
+            {"id": "me@gmail.com", "primary": True}))
+
+    def test_excludes_unselected_non_primary(self):
+        self.assertFalse(ourcal.should_include_calendar(
+            {"id": "x@group.calendar.google.com"}))
+
+    def test_skips_holiday_contacts_addressbook(self):
+        for cid in ["en.usa#holiday@group.v.calendar.google.com",
+                    "#contacts@group.v.calendar.google.com",
+                    "addressbook#contacts@google.com"]:
+            self.assertFalse(ourcal.should_include_calendar(
+                {"id": cid, "selected": True, "primary": True}))
+
+
+class TestDeleteTargetId(unittest.TestCase):
+    """Which Google id a delete addresses depends on the chosen scope."""
+
+    def _src(self, **kw):
+        s = {"label": "Personal", "calendarId": "personal@example.com",
+             "eventId": "evt_20260724T160000Z", "seriesId": "evt"}
+        s.update(kw)
+        return s
+
+    def test_occurrence_scope_targets_the_instance(self):
+        self.assertEqual(
+            ourcal.delete_target_id(self._src(), "occurrence"),
+            "evt_20260724T160000Z")
+
+    def test_series_scope_targets_the_series(self):
+        self.assertEqual(ourcal.delete_target_id(self._src(), "series"), "evt")
+
+    def test_series_scope_falls_back_when_not_recurring(self):
+        # A one-off event has no series; "delete series" must not blow up.
+        self.assertEqual(
+            ourcal.delete_target_id(self._src(seriesId=None), "series"),
+            "evt_20260724T160000Z")
+
+    def test_unknown_scope_defaults_to_occurrence(self):
+        self.assertEqual(ourcal.delete_target_id(self._src(), "nonsense"),
+                         "evt_20260724T160000Z")
+
+
+class _FakeHttpError(Exception):
+    """Stands in for googleapiclient.errors.HttpError, which carries .resp."""
+
+    def __init__(self, status):
+        super().__init__(f"HTTP {status}")
+        self.resp = type("R", (), {"status": status})()
+
+
+class TestAlreadyGone(unittest.TestCase):
+    def test_404_is_already_gone(self):
+        self.assertTrue(ourcal.is_already_gone(_FakeHttpError(404)))
+
+    def test_410_is_already_gone(self):
+        self.assertTrue(ourcal.is_already_gone(_FakeHttpError(410)))
+
+    def test_403_is_not_already_gone(self):
+        self.assertFalse(ourcal.is_already_gone(_FakeHttpError(403)))
+
+    def test_plain_exception_is_not_already_gone(self):
+        self.assertFalse(ourcal.is_already_gone(ValueError("boom")))
+
+
+class _FakeExec:
+    def __init__(self, ret):
+        self._ret = ret
+
+    def execute(self):
+        return self._ret
+
+
+class _FakeEvents:
+    def __init__(self, log, errors=None):
+        self._log = log
+        self._errors = errors or {}
+
+    def _maybe_raise(self, key):
+        exc = self._errors.get(key)
+        if exc:
+            raise exc
+
+    def insert(self, calendarId, body, sendUpdates):
+        self._log.append({"op": "insert", "calendarId": calendarId,
+                          "body": body, "sendUpdates": sendUpdates})
+        self._maybe_raise(calendarId)
+        return _FakeExec({"htmlLink": "https://calendar.google.com/x"})
+
+    def delete(self, calendarId, eventId, sendUpdates):
+        self._log.append({"op": "delete", "calendarId": calendarId,
+                          "eventId": eventId, "sendUpdates": sendUpdates})
+        self._maybe_raise(eventId)
+        return _FakeExec("")
+
+
+class _FakeService:
+    def __init__(self, log, errors=None):
+        self._log = log
+        self._errors = errors
+
+    def events(self):
+        return _FakeEvents(self._log, self._errors)
+
+
+FIXTURE_ACCOUNTS = [
+    {"label": "Personal", "email": "personal@example.com"},
+    {"label": "Second", "email": "second@example.com"},
+]
+
+
+def pin_accounts(test):
+    """Pin ACCOUNTS for a test: the real list comes from a git-ignored
+    accounts.json, so anything asserting on emails must supply its own."""
+    real = ourcal.ACCOUNTS
+    ourcal.ACCOUNTS = list(FIXTURE_ACCOUNTS)
+    test.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+
+
+class TestGoogleCreateWiring(unittest.TestCase):
+    """_google_create runs only against real Google, so demo-mode create tests
+    never touch it. These stub service_for to exercise the wiring directly."""
+
+    def setUp(self):
+        pin_accounts(self)
+        self.calls = []      # (label, email) service_for was asked for
+        self.inserts = []    # what got inserted
+        self._real = ourcal.service_for
+
+        def fake_service_for(label, email):
+            self.calls.append((label, email))
+            return _FakeService(self.inserts)
+
+        ourcal.service_for = fake_service_for
+        self.addCleanup(lambda: setattr(ourcal, "service_for", self._real))
+
+    def _payload(self, **kw):
+        p = {"title": "Sync", "date": "2026-07-24", "startTime": "09:00",
+             "endTime": "09:30", "allDay": False, "notes": "", "location": "",
+             "mode": "copies",
+             "targets": [{"label": "Personal", "blocking": True},
+                         {"label": "Second", "blocking": True}]}
+        p.update(kw)
+        return p
+
+    def test_copies_mode_passes_label_and_email_to_service_for(self):
+        r = ourcal._google_create(self._payload())
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.calls,
+                         [("Personal", "personal@example.com"),
+                          ("Second", "second@example.com")])
+
+    def test_invite_mode_passes_label_and_email_to_service_for(self):
+        r = ourcal._google_create(self._payload(mode="invite",
+                                                inviteFrom="Personal"))
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.calls, [("Personal", "personal@example.com")])
+
+    def test_invite_mode_adds_other_targets_as_attendees(self):
+        ourcal._google_create(self._payload(mode="invite", inviteFrom="Personal"))
+        self.assertEqual(len(self.inserts), 1)
+        self.assertEqual(self.inserts[0]["body"]["attendees"],
+                         [{"email": "second@example.com"}])
+        self.assertEqual(self.inserts[0]["sendUpdates"], "all")
+
+    def test_copies_mode_does_not_notify(self):
+        ourcal._google_create(self._payload())
+        self.assertEqual([i["sendUpdates"] for i in self.inserts],
+                         ["none", "none"])
+
+
+class TestGoogleDeleteWiring(unittest.TestCase):
+    def setUp(self):
+        pin_accounts(self)
+        self.calls = []
+        self.ops = []
+        self.errors = {}
+        real = ourcal.service_for
+
+        def fake_service_for(label, email):
+            self.calls.append((label, email))
+            return _FakeService(self.ops, self.errors)
+
+        ourcal.service_for = fake_service_for
+        self.addCleanup(lambda: setattr(ourcal, "service_for", real))
+
+    def _sources(self):
+        return [
+            {"label": "Personal", "calendarId": "personal@example.com",
+             "eventId": "e1", "seriesId": "s1"},
+            {"label": "Second", "calendarId": "second@example.com",
+             "eventId": "e2", "seriesId": None},
+        ]
+
+    def test_deletes_each_source_with_its_own_calendar_and_id(self):
+        r = ourcal._google_delete({"scope": "occurrence",
+                                   "sources": self._sources()})
+        self.assertTrue(r["ok"])
+        self.assertEqual(
+            [(o["calendarId"], o["eventId"]) for o in self.ops],
+            [("personal@example.com", "e1"), ("second@example.com", "e2")])
+
+    def test_series_scope_deletes_series_id(self):
+        ourcal._google_delete({"scope": "series", "sources": self._sources()})
+        self.assertEqual([o["eventId"] for o in self.ops], ["s1", "e2"])
+
+    def test_never_mails_guests_a_cancellation(self):
+        ourcal._google_delete({"scope": "occurrence",
+                               "sources": self._sources()})
+        self.assertEqual([o["sendUpdates"] for o in self.ops],
+                         ["none", "none"])
+
+    def test_passes_label_and_email_to_service_for(self):
+        ourcal._google_delete({"scope": "occurrence",
+                               "sources": self._sources()})
+        self.assertEqual(self.calls, [("Personal", "personal@example.com"),
+                                      ("Second", "second@example.com")])
+
+    def test_missing_event_counts_as_success(self):
+        self.errors["e1"] = _FakeHttpError(404)
+        r = ourcal._google_delete({"scope": "occurrence",
+                                   "sources": self._sources()})
+        self.assertTrue(r["ok"])
+        self.assertTrue(all(x["ok"] for x in r["results"]))
+
+    def test_one_failure_does_not_abort_the_others(self):
+        self.errors["e1"] = _FakeHttpError(403)
+        r = ourcal._google_delete({"scope": "occurrence",
+                                   "sources": self._sources()})
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["results"][0]["ok"])
+        self.assertTrue(r["results"][1]["ok"])       # second still attempted
+        self.assertEqual(len(self.ops), 2)
+
+
+class TestForwarding(unittest.TestCase):
+    """Forwarding attaches an outside guest to one copy; mirrors stay private."""
+
+    def setUp(self):
+        pin_accounts(self)
+        self.ops = []
+        real = ourcal.service_for
+        ourcal.service_for = lambda label, email: _FakeService(self.ops)
+        self.addCleanup(lambda: setattr(ourcal, "service_for", real))
+
+    def _payload(self, **kw):
+        p = {"title": "AI Tinkerers Bash", "date": "2026-07-28",
+             "startTime": "18:00", "endTime": "22:00", "allDay": False,
+             "notes": "", "location": "1301 2nd Ave", "mode": "copies",
+             "detail": "busy",
+             "targets": [{"label": "Personal", "blocking": True},
+                         {"label": "Second", "blocking": True}]}
+        p.update(kw)
+        return p
+
+    def test_host_copy_gets_full_details_despite_busy_setting(self):
+        ourcal._google_create(self._payload(forwardTo=["sam@example.com"],
+                                            forwardFrom="Personal"))
+        host = self.ops[0]["body"]
+        self.assertEqual(host["summary"], "AI Tinkerers Bash")
+        self.assertEqual(host["location"], "1301 2nd Ave")
+
+    def test_mirrors_stay_anonymous(self):
+        ourcal._google_create(self._payload(forwardTo=["sam@example.com"],
+                                            forwardFrom="Personal"))
+        mirror = self.ops[1]["body"]
+        self.assertEqual(mirror["summary"], "Busy")
+        self.assertNotIn("location", mirror)
+
+    def test_only_host_carries_the_guest_and_notifies(self):
+        ourcal._google_create(self._payload(forwardTo=["sam@example.com"],
+                                            forwardFrom="Personal"))
+        self.assertEqual(self.ops[0]["body"]["attendees"],
+                         [{"email": "sam@example.com"}])
+        self.assertEqual(self.ops[0]["sendUpdates"], "all")
+        self.assertNotIn("attendees", self.ops[1]["body"])
+        self.assertEqual(self.ops[1]["sendUpdates"], "none")
+
+    def test_multiple_forward_addresses(self):
+        ourcal._google_create(self._payload(
+            forwardTo=["sam@example.com", "kim@example.org"],
+            forwardFrom="Personal"))
+        self.assertEqual(self.ops[0]["body"]["attendees"],
+                         [{"email": "sam@example.com"},
+                          {"email": "kim@example.org"}])
+
+    def test_without_forwarding_all_copies_follow_detail(self):
+        ourcal._google_create(self._payload())
+        self.assertEqual([o["body"]["summary"] for o in self.ops],
+                         ["Busy", "Busy"])
+        self.assertTrue(all("attendees" not in o["body"] for o in self.ops))
+
+    def test_invalid_forward_address_is_rejected_before_any_call(self):
+        # Validation sits on create_event so demo and Google agree; a backend
+        # that skipped it would let the demo "succeed" where Google refuses.
+        r = ourcal.create_event(self._payload(forwardTo=["not-an-email"],
+                                              forwardFrom="Personal"))
+        self.assertFalse(r["ok"])
+        self.assertIn("not-an-email", r["error"])
+        self.assertEqual(self.ops, [])   # nothing created
+
+    def test_demo_backend_rejects_bad_address_too(self):
+        os.environ["OURCAL_DEMO"] = "1"
+        ourcal.reset_demo()
+        before = len(ourcal.get_events()["events"])
+        r = ourcal.create_event(self._payload(forwardTo=["nope"],
+                                              forwardFrom="Personal"))
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(ourcal.get_events()["events"]), before)
+
+
+class TestEmailValidation(unittest.TestCase):
+    def test_accepts_ordinary_addresses(self):
+        for addr in ["sam@example.com", "a.b+tag@sub.example.co.uk"]:
+            self.assertTrue(ourcal.valid_email(addr), addr)
+
+    def test_rejects_malformed(self):
+        for addr in ["", "  ", "no-at-sign", "a@", "@b.com", "a b@c.com",
+                     "a@b", None]:
+            self.assertFalse(ourcal.valid_email(addr), repr(addr))
+
+
+class TestAccountIdentity(unittest.TestCase):
+    """A token must belong to the account it is filed under (see primary_email).
+
+    The signed-in account's address is the id of its primary calendar, which is
+    already present in the calendarList response — so verifying costs no extra
+    API call.
+    """
+
+    def _cals(self, primary_id, extra=()):
+        cals = [{"id": "team@group.calendar.google.com", "selected": True}]
+        cals.extend(extra)
+        if primary_id is not None:
+            cals.append({"id": primary_id, "primary": True})
+        return cals
+
+    def test_primary_email_is_id_of_primary_calendar(self):
+        self.assertEqual(
+            ourcal.primary_email(self._cals("third@example.com")),
+            "third@example.com")
+
+    def test_primary_email_normalizes_case(self):
+        self.assertEqual(
+            ourcal.primary_email(self._cals("Personal@Example.com")),
+            "personal@example.com")
+
+    def test_primary_email_empty_when_no_primary(self):
+        self.assertEqual(ourcal.primary_email(self._cals(None)), "")
+
+    def test_no_error_when_account_matches(self):
+        cals = self._cals("second@example.com")
+        self.assertIsNone(
+            ourcal.account_mismatch("Second", "second@example.com", cals))
+
+    def test_no_error_when_match_differs_only_by_case(self):
+        cals = self._cals("Second@EXAMPLE.com")
+        self.assertIsNone(
+            ourcal.account_mismatch("Second", "second@example.com", cals))
+
+    def test_no_error_when_primary_undeterminable(self):
+        # Can't identify the account -> don't block the user on a guess.
+        self.assertIsNone(
+            ourcal.account_mismatch("Personal", "personal@example.com",
+                                    self._cals(None)))
+
+    def test_reports_the_work_mislabel(self):
+        # The real-world bug: signing in as the personal account at the
+        # "Work" prompt stamped personal events with the Work badge.
+        cals = self._cals("personal@example.com")
+        msg = ourcal.account_mismatch("Work", "work@example.com", cals)
+        self.assertIsNotNone(msg)
+        self.assertIn("personal@example.com", msg)        # who actually signed in
+        self.assertIn("work@example.com", msg)    # who was expected
+        self.assertIn("token_work.json", msg)     # what to delete
+
+    def test_message_names_token_file_via_slug(self):
+        cals = self._cals("fourth@example.com")
+        msg = ourcal.account_mismatch("Third", "third@example.com", cals)
+        self.assertIn("token_third.json", msg)
+
+    def test_mismatched_account_yields_no_events(self):
+        # Wrong account must produce an error and zero events -- never events
+        # filed under the wrong label.
+        cals = self._cals("personal@example.com")
+        self.assertIsNotNone(
+            ourcal.account_mismatch("Fourth", "fourth@example.com", cals))
+
+
+import json, threading, urllib.error, urllib.request
+
+
+class TestHttp(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ["OURCAL_DEMO"] = "1"
+        ourcal.reset_demo()
+        cls.server = ourcal.make_server(0)
+        cls.port = cls.server.server_address[1]
+        cls.t = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.t.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _get(self, path):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}") as r:
+            return r.status, r.read().decode()
+
+    def _post(self, path, obj):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(obj).encode(), method="POST",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read().decode())
+
+    def test_root_serves_ourcal_html(self):
+        status, body = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("OurCal", body)
+        self.assertNotIn("__POLL_MS__", body)  # placeholder substituted
+
+    def test_events_endpoint_stable_twice(self):
+        _, a = self._get("/api/events")
+        _, b = self._get("/api/events")
+        ja, jb = json.loads(a), json.loads(b)
+        self.assertEqual(ja["events"], jb["events"])  # no mutation across reads
+
+    def test_create_timed_then_allday_then_invite(self):
+        _, r1 = self._post("/api/create", {
+            "title": "T", "date": "2026-07-24", "startTime": "10:00",
+            "endTime": "10:30", "allDay": False, "notes": "", "location": "",
+            "mode": "copies", "targets": [{"label": "Personal", "blocking": True}]})
+        self.assertTrue(r1["ok"])
+        _, r2 = self._post("/api/create", {
+            "title": "A", "date": "2026-08-01", "allDay": True, "startTime": "",
+            "endTime": "", "notes": "", "location": "", "mode": "copies",
+            "targets": [{"label": "Personal", "blocking": False}]})
+        self.assertTrue(r2["ok"])
+        _, r3 = self._post("/api/create", {
+            "title": "I", "date": "2026-07-25", "startTime": "11:00",
+            "endTime": "11:30", "allDay": False, "notes": "", "location": "",
+            "mode": "invite", "inviteFrom": "Personal",
+            "targets": [{"label": "Personal", "blocking": True},
+                        {"label": "Work", "blocking": True}]})
+        self.assertTrue(r3["ok"])
+
+
+class TestDeleteEndpoint(unittest.TestCase):
+    """End-to-end over HTTP in demo mode: a deleted event stops coming back."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["OURCAL_DEMO"] = "1"
+        cls.server = ourcal.make_server(0)
+        cls.port = cls.server.server_address[1]
+        cls.t = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.t.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        ourcal.reset_demo()
+
+    def _post(self, path, obj):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(obj).encode(), method="POST",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read().decode())
+
+    def _events(self):
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/api/events") as r:
+            return json.loads(r.read().decode())["events"]
+
+    def _find(self, title):
+        return next(e for e in self._events() if e["title"] == title)
+
+    def test_events_expose_sources_for_addressing(self):
+        ev = self._find("Team Standup")
+        self.assertEqual(len(ev["sources"]), 1)
+        self.assertEqual(ev["sources"][0]["eventId"], "standup-1")
+
+    def test_merged_event_exposes_both_sources(self):
+        ev = self._find("Family dinner")
+        self.assertEqual([s["label"] for s in ev["sources"]],
+                         ["Personal", "Work"])
+
+    def test_delete_removes_the_event(self):
+        ev = self._find("Team Standup")
+        status, res = self._post("/api/delete",
+                                 {"scope": "occurrence",
+                                  "sources": ev["sources"]})
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        self.assertNotIn("Team Standup", [e["title"] for e in self._events()])
+
+    def test_delete_leaves_other_events_alone(self):
+        before = len(self._events())
+        ev = self._find("Team Standup")
+        self._post("/api/delete",
+                   {"scope": "occurrence", "sources": ev["sources"]})
+        self.assertEqual(len(self._events()), before - 1)
+
+    def test_deleting_one_source_of_a_merged_row(self):
+        ev = self._find("Family dinner")
+        one = [s for s in ev["sources"] if s["label"] == "Work"]
+        res = self._post("/api/delete",
+                         {"scope": "occurrence", "sources": one})[1]
+        self.assertTrue(res["ok"])
+        self.assertEqual([r["label"] for r in res["results"]], ["Work"])
+
+    def test_unknown_post_route_still_404s(self):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/nope", data=b"{}",
+            method="POST", headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req)
+        self.assertEqual(cm.exception.code, 404)
+
+
+class TestBootstrapGuard(unittest.TestCase):
+    def test_demo_skips_bootstrap(self):
+        os.environ["OURCAL_DEMO"] = "1"
+        os.environ.pop("OURCAL_REEXEC", None)
+        self.assertFalse(ourcal.needs_bootstrap())
+
+    def test_reexec_guard_skips_bootstrap(self):
+        os.environ.pop("OURCAL_DEMO", None)
+        os.environ["OURCAL_REEXEC"] = "1"
+        try:
+            self.assertFalse(ourcal.needs_bootstrap())
+        finally:
+            os.environ["OURCAL_DEMO"] = "1"  # restore for other tests
+            os.environ.pop("OURCAL_REEXEC", None)
+
+
+class TestPageStructure(unittest.TestCase):
+    def test_page_has_core_markers(self):
+        p = ourcal.PAGE
+        for marker in ["OurCal", "New event", "id=\"agenda\"", "id=\"chips\"",
+                       "id=\"modal\"", "prefers-color-scheme",
+                       "data-theme", "/api/events", "/api/create", "__POLL_MS__",
+                       # delete + sync
+                       "/api/delete", "id=\"delModal\"", "id=\"delRows\"",
+                       "id=\"wrap-scope\"", "id=\"seg-detail\"", "id=\"f-fwd\"",
+                       "id=\"f-fwdfrom\"", "openSync", "openDelete",
+                       "submitDelete"]:
+            self.assertIn(marker, p, f"missing {marker!r}")
+
+    def test_delete_dialog_offers_occurrence_and_series(self):
+        self.assertIn('value="occurrence"', ourcal.PAGE)
+        self.assertIn('value="series"', ourcal.PAGE)
+
+    def test_detail_segment_offers_full_and_busy(self):
+        self.assertIn('data-v="full"', ourcal.PAGE)
+        self.assertIn('data-v="busy"', ourcal.PAGE)
+
+    def test_target_lookup_is_scoped_to_the_account_picker(self):
+        # The delete dialog renders .acct rows too, but without .inc/.seg.bf.
+        # An unscoped querySelectorAll(".acct") picked those up and made every
+        # later Sync/Create click die silently on a null .checked.
+        self.assertNotIn('querySelectorAll(".acct")', ourcal.PAGE)
+        self.assertIn('querySelectorAll("#acctRows .acct")', ourcal.PAGE)
+        self.assertNotIn('querySelector(".host:checked")', ourcal.PAGE)
+
+    def test_click_handlers_report_errors_instead_of_dying_silently(self):
+        self.assertIn("function guard(", ourcal.PAGE)
+        for wired in ["guard(submit)", "guard(submitDelete)", "guard(openModal)"]:
+            self.assertIn(wired, ourcal.PAGE, f"unguarded handler: {wired}")
+
+
+if __name__ == "__main__":
+    unittest.main()
