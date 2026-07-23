@@ -545,6 +545,72 @@ class TestDemoService(unittest.TestCase):
         self.assertTrue(r1["ok"] and r2["ok"])
 
 
+class TestDemoUpdate(unittest.TestCase):
+    def setUp(self):
+        os.environ["OURCAL_DEMO"] = "1"
+        ourcal.reset_demo()
+
+    def _find(self, title):
+        return [e for e in ourcal.get_events()["events"] if e["title"] == title]
+
+    def _sources_of(self, title):
+        return self._find(title)[0]["sources"]
+
+    def test_moving_an_event_changes_its_slot(self):
+        srcs = self._sources_of("Team Standup")
+        r = ourcal.update_events({
+            "title": "Team Standup", "date": "2026-09-09",
+            "startTime": "15:00", "endTime": "15:30", "allDay": False,
+            "location": "", "notes": "", "scope": "occurrence",
+            "sources": srcs})
+        self.assertTrue(r["ok"])
+        moved = self._find("Team Standup")[0]
+        self.assertTrue(moved["start"].startswith("2026-09-09T15:00"))
+
+    def test_retitling_is_visible_in_the_agenda(self):
+        srcs = self._sources_of("Team Standup")
+        ourcal.update_events({
+            "title": "Renamed", "date": "2026-09-09", "startTime": "15:00",
+            "endTime": "15:30", "allDay": False, "location": "", "notes": "",
+            "scope": "occurrence", "sources": srcs})
+        self.assertEqual(len(self._find("Renamed")), 1)
+        self.assertEqual(self._find("Team Standup"), [])
+
+    def test_updating_every_source_keeps_a_merged_row_merged(self):
+        srcs = self._sources_of("Dentist appointment")
+        self.assertEqual(len(srcs), 2)
+        ourcal.update_events({
+            "title": "Dentist appointment", "date": "2026-09-10",
+            "startTime": "09:00", "endTime": "10:00", "allDay": False,
+            "location": "", "notes": "", "scope": "occurrence",
+            "sources": srcs})
+        rows = self._find("Dentist appointment")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows[0]["sources"]), 2)
+
+    def test_updating_one_source_splits_the_row(self):
+        # Moving only one copy gives it a different slot, so it stops sharing
+        # an identity with the copy left behind. Two rows is correct.
+        srcs = self._sources_of("Dentist appointment")
+        ourcal.update_events({
+            "title": "Dentist appointment", "date": "2026-09-11",
+            "startTime": "09:00", "endTime": "10:00", "allDay": False,
+            "location": "", "notes": "", "scope": "occurrence",
+            "sources": [srcs[0]]})
+        self.assertEqual(len(self._find("Dentist appointment")), 2)
+
+    def test_invalid_payload_is_rejected_before_anything_changes(self):
+        srcs = self._sources_of("Team Standup")
+        before = ourcal.get_events()["events"]
+        r = ourcal.update_events({
+            "title": "T", "date": "", "startTime": "", "endTime": "",
+            "allDay": False, "location": "", "notes": "",
+            "scope": "occurrence", "sources": srcs})
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["error"])
+        self.assertEqual(ourcal.get_events()["events"], before)
+
+
 class TestCalendarFilter(unittest.TestCase):
     def test_includes_selected(self):
         self.assertTrue(ourcal.should_include_calendar(

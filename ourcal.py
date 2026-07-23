@@ -405,6 +405,17 @@ def delete_events(payload):
     return _google_delete(payload)               # defined in GOOGLE section
 
 
+def update_events(payload):
+    # Validate here, not in the backends, so demo and Google behave identically
+    # and no calendar is written when the form is unusable.
+    bad = edit_error(payload)
+    if bad:
+        return {"ok": False, "results": [], "error": bad}
+    if is_demo():
+        return _demo_update(payload)
+    return _google_update(payload)               # defined in GOOGLE section
+
+
 def _demo_delete(payload):
     global _DEMO_STORE
     if _DEMO_STORE is None:
@@ -415,6 +426,33 @@ def _demo_delete(payload):
     _DEMO_STORE = [e for e in _DEMO_STORE
                    if not any(src.get("eventId") in doomed
                               for src in e.get("sources", []))]
+    return {"ok": True,
+            "results": [{"label": s.get("label"), "ok": True} for s in sources]}
+
+
+def _demo_update(payload):
+    global _DEMO_STORE
+    if _DEMO_STORE is None:
+        reset_demo()
+    scope = payload.get("scope", "occurrence")
+    sources = payload.get("sources", [])
+    targets = {target_id(s, scope) for s in sources}
+    body = build_patch_body(payload)
+    store = []
+    for e in _DEMO_STORE:
+        hit = any(src.get("eventId") in targets for src in e.get("sources", []))
+        if not hit:
+            store.append(e)
+            continue
+        moved = dict(e)          # copy-on-write, as merge_events does
+        moved["title"] = body["summary"]
+        moved["allDay"] = "date" in body["start"]
+        moved["start"] = body["start"].get("date") or body["start"]["dateTime"]
+        moved["end"] = body["end"].get("date") or body["end"]["dateTime"]
+        moved["location"] = body["location"] or None
+        moved["notes"] = body["description"] or None
+        store.append(moved)
+    _DEMO_STORE = store
     return {"ok": True,
             "results": [{"label": s.get("label"), "ok": True} for s in sources]}
 
