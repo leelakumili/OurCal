@@ -644,6 +644,37 @@ class TestBuildPatchBody(unittest.TestCase):
         self.assertEqual(p, snap)
 
 
+class TestEditValidation(unittest.TestCase):
+    def _p(self, **kw):
+        p = {"date": "2026-07-24", "startTime": "11:00", "endTime": "12:00",
+             "allDay": False, "sources": [{"label": "Personal"}]}
+        p.update(kw)
+        return p
+
+    def test_good_payload_has_no_error(self):
+        self.assertIsNone(ourcal.edit_error(self._p()))
+
+    def test_missing_date_is_rejected(self):
+        self.assertIn("date", ourcal.edit_error(self._p(date="")).lower())
+
+    def test_end_before_start_is_rejected(self):
+        self.assertIn("end", ourcal.edit_error(
+            self._p(startTime="12:00", endTime="11:00")).lower())
+
+    def test_zero_length_event_is_rejected(self):
+        self.assertIsNotNone(ourcal.edit_error(
+            self._p(startTime="11:00", endTime="11:00")))
+
+    def test_all_day_ignores_times(self):
+        # An all-day edit sends no usable times; validating them would reject
+        # a perfectly good payload.
+        self.assertIsNone(ourcal.edit_error(
+            self._p(allDay=True, startTime="", endTime="")))
+
+    def test_no_sources_is_rejected(self):
+        self.assertIn("calendar", ourcal.edit_error(self._p(sources=[])).lower())
+
+
 class _FakeHttpError(Exception):
     """Stands in for googleapiclient.errors.HttpError, which carries .resp."""
 

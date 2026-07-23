@@ -269,6 +269,23 @@ def build_patch_body(payload):
     return body
 
 
+def edit_error(payload):
+    """Why this edit cannot be applied, or None. Checked before any write so a
+    bad form never lands on some calendars and not others."""
+    if not payload.get("sources"):
+        return "Pick at least one calendar"
+    if not payload.get("date"):
+        return "Pick a date"
+    if payload.get("allDay"):
+        return None
+    start, end = payload.get("startTime") or "", payload.get("endTime") or ""
+    if not start or not end:
+        return "Pick a start and end time"
+    if end <= start:      # "HH:MM" strings compare correctly as text
+        return "End time must be after the start time"
+    return None
+
+
 def forward_addresses(payload):
     """Non-empty, whitespace-trimmed forward targets from a create payload."""
     return [a.strip() for a in (payload.get("forwardTo") or [])
