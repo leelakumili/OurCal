@@ -644,6 +644,36 @@ def _google_delete(payload):
     return {"ok": all(r["ok"] for r in results), "results": results}
 
 
+def _google_update(payload):
+    """Patch each chosen source in place. Per-source isolation, as with collect
+    and delete: one calendar refusing must not strand the others."""
+    scope = payload.get("scope", "occurrence")
+    body = build_patch_body(payload)
+    results = []
+    for s in payload.get("sources", []):
+        label = s.get("label")
+        try:
+            svc = service_for(label, _email_for(label))
+            svc.events().patch(calendarId=s.get("calendarId") or "primary",
+                               eventId=target_id(s, scope), body=body,
+                               sendUpdates="none").execute()
+            results.append({"label": label, "ok": True})
+        except Exception as e:
+            results.append({"label": label, "ok": False,
+                            "error": _edit_failure(e)})
+    return {"ok": all(r["ok"] for r in results), "results": results}
+
+
+def _edit_failure(exc):
+    """Turn a Google exception into something the toast can say out loud."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status == 403:
+        return "only the organizer can edit this event"
+    if status in (404, 410):
+        return "event no longer exists — refresh"
+    return str(exc)
+
+
 def _google_create(payload):
     mode = payload.get("mode", "copies")
     targets = payload["targets"]

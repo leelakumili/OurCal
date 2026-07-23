@@ -793,6 +793,13 @@ class _FakeEvents:
         self._maybe_raise(eventId)
         return _FakeExec("")
 
+    def patch(self, calendarId, eventId, body, sendUpdates):
+        self._log.append({"op": "patch", "calendarId": calendarId,
+                          "eventId": eventId, "body": body,
+                          "sendUpdates": sendUpdates})
+        self._maybe_raise(eventId)
+        return _FakeExec({"id": eventId})
+
 
 class _FakeService:
     def __init__(self, log, errors=None):
@@ -931,6 +938,73 @@ class TestGoogleDeleteWiring(unittest.TestCase):
         self.assertFalse(r["results"][0]["ok"])
         self.assertTrue(r["results"][1]["ok"])       # second still attempted
         self.assertEqual(len(self.ops), 2)
+
+
+class TestGoogleUpdateWiring(unittest.TestCase):
+    def setUp(self):
+        pin_accounts(self)
+        self.ops = []
+        self.errors = {}
+        real = ourcal.service_for
+        ourcal.service_for = lambda label, email: _FakeService(self.ops,
+                                                               self.errors)
+        self.addCleanup(lambda: setattr(ourcal, "service_for", real))
+
+    def _payload(self, **kw):
+        p = {"title": "Dentist", "date": "2026-07-24", "startTime": "11:00",
+             "endTime": "12:00", "allDay": False, "location": "", "notes": "",
+             "scope": "occurrence",
+             "sources": [
+                 {"label": "Personal", "calendarId": "personal@example.com",
+                  "eventId": "e1", "seriesId": "s1"},
+                 {"label": "Second", "calendarId": "second@example.com",
+                  "eventId": "e2", "seriesId": None}]}
+        p.update(kw)
+        return p
+
+    def test_patches_each_source_with_its_own_calendar_and_id(self):
+        r = ourcal._google_update(self._payload())
+        self.assertTrue(r["ok"])
+        self.assertEqual([(o["calendarId"], o["eventId"]) for o in self.ops],
+                         [("personal@example.com", "e1"),
+                          ("second@example.com", "e2")])
+
+    def test_uses_patch_not_insert(self):
+        ourcal._google_update(self._payload())
+        self.assertEqual([o["op"] for o in self.ops], ["patch", "patch"])
+
+    def test_series_scope_patches_the_series_id(self):
+        ourcal._google_update(self._payload(scope="series"))
+        self.assertEqual([o["eventId"] for o in self.ops], ["s1", "e2"])
+
+    def test_never_mails_guests(self):
+        ourcal._google_update(self._payload())
+        self.assertEqual([o["sendUpdates"] for o in self.ops], ["none", "none"])
+
+    def test_body_carries_no_busy_free_state(self):
+        ourcal._google_update(self._payload())
+        self.assertNotIn("transparency", self.ops[0]["body"])
+
+    def test_one_failure_does_not_abort_the_others(self):
+        self.errors["e1"] = _FakeHttpError(403)
+        r = ourcal._google_update(self._payload())
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["results"][0]["ok"])
+        self.assertTrue(r["results"][1]["ok"])
+        self.assertEqual(len(self.ops), 2)
+
+    def test_403_reads_as_a_permission_problem(self):
+        self.errors["e1"] = _FakeHttpError(403)
+        r = ourcal._google_update(self._payload())
+        self.assertIn("organizer", r["results"][0]["error"].lower())
+
+    def test_missing_event_is_a_failure_not_a_success(self):
+        # Unlike delete, where "already gone" achieved the goal, an edit that
+        # cannot find its event did not land.
+        self.errors["e1"] = _FakeHttpError(404)
+        r = ourcal._google_update(self._payload())
+        self.assertFalse(r["results"][0]["ok"])
+        self.assertIn("refresh", r["results"][0]["error"].lower())
 
 
 class TestForwarding(unittest.TestCase):
