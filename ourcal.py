@@ -244,12 +244,29 @@ def build_event_body(payload, blocking, detail="full"):
     return body
 
 
-def delete_target_id(source, scope):
-    """Which Google id a delete addresses — the series only when asked for it
-    and the event actually has one."""
+def target_id(source, scope):
+    """Which Google id an edit or delete addresses — the series only when asked
+    for it and the event actually has one."""
     if scope == "series" and source.get("seriesId"):
         return source["seriesId"]
     return source.get("eventId", "")
+
+
+def build_patch_body(payload):
+    """Edit-payload → Google events.patch body.
+
+    Reuses the create builder for correct start/end shapes, then drops the
+    busy/free and privacy keys: an edit changes what the user typed and must
+    not silently restate axes they never opened. Location and notes are sent
+    even when empty — patch ignores absent keys, so omitting them would make
+    clearing a location impossible.
+    """
+    body = build_event_body(payload, blocking=True, detail="full")
+    body.pop("transparency", None)
+    body.pop("visibility", None)
+    body["location"] = payload.get("location") or ""
+    body["description"] = payload.get("notes") or ""
+    return body
 
 
 def forward_addresses(payload):
@@ -377,7 +394,7 @@ def _demo_delete(payload):
         reset_demo()
     scope = payload.get("scope", "occurrence")
     sources = payload.get("sources", [])
-    doomed = {delete_target_id(s, scope) for s in sources}
+    doomed = {target_id(s, scope) for s in sources}
     _DEMO_STORE = [e for e in _DEMO_STORE
                    if not any(src.get("eventId") in doomed
                               for src in e.get("sources", []))]
@@ -560,7 +577,7 @@ def _google_delete(payload):
         try:
             svc = service_for(label, _email_for(label))
             svc.events().delete(calendarId=s.get("calendarId") or "primary",
-                                eventId=delete_target_id(s, scope),
+                                eventId=target_id(s, scope),
                                 sendUpdates="none").execute()
             results.append({"label": label, "ok": True})
         except Exception as e:   # per-source isolation, as with collect

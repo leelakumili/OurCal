@@ -566,8 +566,8 @@ class TestCalendarFilter(unittest.TestCase):
                 {"id": cid, "selected": True, "primary": True}))
 
 
-class TestDeleteTargetId(unittest.TestCase):
-    """Which Google id a delete addresses depends on the chosen scope."""
+class TestTargetId(unittest.TestCase):
+    """Which Google id an edit or delete addresses depends on the chosen scope."""
 
     def _src(self, **kw):
         s = {"label": "Personal", "calendarId": "personal@example.com",
@@ -577,21 +577,71 @@ class TestDeleteTargetId(unittest.TestCase):
 
     def test_occurrence_scope_targets_the_instance(self):
         self.assertEqual(
-            ourcal.delete_target_id(self._src(), "occurrence"),
+            ourcal.target_id(self._src(), "occurrence"),
             "evt_20260724T160000Z")
 
     def test_series_scope_targets_the_series(self):
-        self.assertEqual(ourcal.delete_target_id(self._src(), "series"), "evt")
+        self.assertEqual(ourcal.target_id(self._src(), "series"), "evt")
 
     def test_series_scope_falls_back_when_not_recurring(self):
         # A one-off event has no series; "delete series" must not blow up.
         self.assertEqual(
-            ourcal.delete_target_id(self._src(seriesId=None), "series"),
+            ourcal.target_id(self._src(seriesId=None), "series"),
             "evt_20260724T160000Z")
 
     def test_unknown_scope_defaults_to_occurrence(self):
-        self.assertEqual(ourcal.delete_target_id(self._src(), "nonsense"),
+        self.assertEqual(ourcal.target_id(self._src(), "nonsense"),
                          "evt_20260724T160000Z")
+
+
+class TestBuildPatchBody(unittest.TestCase):
+    """An edit changes what the user typed and nothing else."""
+
+    def _p(self, **kw):
+        p = {"title": "Dentist", "date": "2026-07-24", "startTime": "11:00",
+             "endTime": "12:00", "allDay": False, "location": "", "notes": ""}
+        p.update(kw)
+        return p
+
+    def test_sets_summary_and_times(self):
+        b = ourcal.build_patch_body(self._p())
+        self.assertEqual(b["summary"], "Dentist")
+        self.assertEqual(b["start"], {"dateTime": "2026-07-24T11:00:00",
+                                      "timeZone": ourcal.TIMEZONE})
+        self.assertEqual(b["end"], {"dateTime": "2026-07-24T12:00:00",
+                                    "timeZone": ourcal.TIMEZONE})
+
+    def test_all_day_uses_exclusive_end_date(self):
+        b = ourcal.build_patch_body(self._p(allDay=True))
+        self.assertEqual(b["start"], {"date": "2026-07-24"})
+        self.assertEqual(b["end"], {"date": "2026-07-25"})
+
+    def test_never_touches_busy_free_or_privacy(self):
+        # The user edited a title; silently flipping the event to "busy"
+        # because the create form defaults that way would be a data change
+        # they never asked for.
+        b = ourcal.build_patch_body(self._p())
+        self.assertNotIn("transparency", b)
+        self.assertNotIn("visibility", b)
+
+    def test_location_and_notes_round_trip(self):
+        b = ourcal.build_patch_body(self._p(location="Suite 207",
+                                            notes="Bring x-rays"))
+        self.assertEqual(b["location"], "Suite 207")
+        self.assertEqual(b["description"], "Bring x-rays")
+
+    def test_cleared_location_and_notes_are_sent_as_empty_not_dropped(self):
+        # patch() ignores absent keys, so omitting these would make clearing a
+        # location impossible — the old value would survive the edit.
+        b = ourcal.build_patch_body(self._p(location="", notes=""))
+        self.assertEqual(b["location"], "")
+        self.assertEqual(b["description"], "")
+
+    def test_does_not_mutate_the_payload(self):
+        p = self._p()
+        snap = copy.deepcopy(p)
+        ourcal.build_patch_body(p)
+        self.assertEqual(p, snap)
 
 
 class _FakeHttpError(Exception):
