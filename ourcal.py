@@ -79,7 +79,23 @@ PALETTE_DARK  = ["#5b9cf0", "#ff8a5c", "#3fd39c", "#ffc23d", "#ff9ec4"]
 
 
 # ── NORMALIZE ───────────────────────────────────────────────────────────
-def normalize(raw, label, calendar_name, calendar_id=""):
+def can_edit(raw, access_role):
+    """Whether this account may modify this event in place.
+
+    Two independent gates. The calendar must be writable at all, and we must
+    have standing on the event: Google rejects a non-organizer's patch with 403
+    unless the organizer opted into `guestsCanModify`. An event with no
+    organizer block at all is ours by default — only the calendar gate applies.
+    """
+    if access_role not in ("owner", "writer"):
+        return False
+    organizer = raw.get("organizer") or {}
+    if organizer and not organizer.get("self"):
+        return bool(raw.get("guestsCanModify"))
+    return True
+
+
+def normalize(raw, label, calendar_name, calendar_id="", access_role="owner"):
     """Google event dict → normalized event (spec §6). Pure; reads inputs only.
 
     `sources` records where this event really lives so the UI can delete it
@@ -98,6 +114,7 @@ def normalize(raw, label, calendar_name, calendar_id=""):
             "eventId": raw.get("id", ""),
             "seriesId": raw.get("recurringEventId") or None,
             "calendarName": calendar_name,
+            "editable": can_edit(raw, access_role),
         }],
         "title": (raw.get("summary") or "").strip() or "Busy",
         "start": start,
@@ -105,6 +122,7 @@ def normalize(raw, label, calendar_name, calendar_id=""):
         "allDay": all_day,
         "busy": raw.get("transparency", "opaque") != "transparent",
         "location": raw.get("location") or None,
+        "notes": raw.get("description") or None,
         "join": raw.get("hangoutLink") or None,
         "labels": [label],
         "calendars": [calendar_name],
@@ -497,7 +515,8 @@ def list_account_events(label, email, time_min, time_max):
                     timeMin=time_min, timeMax=time_max, pageToken=page,
                     maxResults=2500).execute()
                 for raw in resp.get("items", []):
-                    events.append(normalize(raw, label, cal_name, cal["id"]))
+                    events.append(normalize(raw, label, cal_name, cal["id"],
+                                            cal.get("accessRole")))
                 page = resp.get("nextPageToken")
                 if not page:
                     break

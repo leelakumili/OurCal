@@ -154,6 +154,70 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(n["guests"], 0)
 
 
+class TestCanEdit(unittest.TestCase):
+    """Two independent gates gate a patch: write access to the calendar, and
+    standing on the event itself."""
+
+    def test_owner_of_own_event_may_edit(self):
+        raw = {"organizer": {"self": True}}
+        self.assertTrue(ourcal.can_edit(raw, "owner"))
+
+    def test_writer_of_own_event_may_edit(self):
+        raw = {"organizer": {"self": True}}
+        self.assertTrue(ourcal.can_edit(raw, "writer"))
+
+    def test_reader_may_never_edit(self):
+        # A subscribed/read-only calendar rejects writes whoever organized it.
+        raw = {"organizer": {"self": True}}
+        self.assertFalse(ourcal.can_edit(raw, "reader"))
+
+    def test_guest_of_someone_elses_event_may_not_edit(self):
+        raw = {"organizer": {"email": "host@example.com"}}
+        self.assertFalse(ourcal.can_edit(raw, "owner"))
+
+    def test_guest_may_edit_when_organizer_allowed_it(self):
+        raw = {"organizer": {"email": "host@example.com"},
+               "guestsCanModify": True}
+        self.assertTrue(ourcal.can_edit(raw, "owner"))
+
+    def test_missing_organizer_block_falls_back_to_calendar_access(self):
+        self.assertTrue(ourcal.can_edit({}, "owner"))
+        self.assertFalse(ourcal.can_edit({}, "reader"))
+
+    def test_missing_access_role_is_treated_as_unwritable(self):
+        self.assertFalse(ourcal.can_edit({"organizer": {"self": True}}, None))
+
+
+class TestNormalizeEditFields(unittest.TestCase):
+    def _raw(self, **kw):
+        raw = {"iCalUID": "abc@google.com", "id": "evt123", "summary": "Standup",
+               "start": {"dateTime": "2026-07-23T09:00:00-07:00"},
+               "end":   {"dateTime": "2026-07-23T09:30:00-07:00"},
+               "organizer": {"self": True}}
+        raw.update(kw)
+        return raw
+
+    def test_captures_description_as_notes(self):
+        n = ourcal.normalize(self._raw(description="Bring x-rays"), "L", "C")
+        self.assertEqual(n["notes"], "Bring x-rays")
+
+    def test_notes_is_none_when_absent(self):
+        self.assertIsNone(ourcal.normalize(self._raw(), "L", "C")["notes"])
+
+    def test_source_carries_editable_true_for_own_event(self):
+        n = ourcal.normalize(self._raw(), "L", "C", "c@x", access_role="owner")
+        self.assertTrue(n["sources"][0]["editable"])
+
+    def test_source_carries_editable_false_for_readonly_calendar(self):
+        n = ourcal.normalize(self._raw(), "L", "C", "c@x", access_role="reader")
+        self.assertFalse(n["sources"][0]["editable"])
+
+    def test_access_role_defaults_to_owner(self):
+        # Demo fixtures and older call sites pass no role; they are our own.
+        n = ourcal.normalize(self._raw(), "L", "C")
+        self.assertTrue(n["sources"][0]["editable"])
+
+
 class TestSources(unittest.TestCase):
     """A unified row must be able to address the real events behind it."""
 
@@ -169,7 +233,8 @@ class TestSources(unittest.TestCase):
                              "personal@example.com")
         self.assertEqual(n["sources"], [{
             "label": "Personal", "calendarId": "personal@example.com",
-            "eventId": "evt123", "seriesId": None, "calendarName": "Primary"}])
+            "eventId": "evt123", "seriesId": None, "calendarName": "Primary",
+            "editable": True}])
 
     def test_normalize_carries_series_id_for_recurring(self):
         n = ourcal.normalize(self._raw(id="evt123_20260724T160000Z",
