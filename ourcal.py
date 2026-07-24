@@ -1295,9 +1295,9 @@ function openDelete(ev){
   document.getElementById("del-summary").innerHTML=
     `<div class="dt">${esc(ev.title)}</div><div class="dw">${esc(fmtDayHeading(dayKey(ev.start,ev.allDay)))} · ${esc(when)}</div>`;
   const box=document.getElementById("delRows"); box.innerHTML="";
-  srcs.forEach((s,i)=>{
+  srcs.forEach(s=>{
     const row=document.createElement("div"); row.className="acct";
-    row.innerHTML=`<input type="checkbox" class="delsrc" checked data-i="${i}">`+
+    row.innerHTML=`<input type="checkbox" class="delsrc" checked data-eid="${esc(s.eventId)}" data-cal="${esc(s.calendarId||"")}">`+
       `<span class="dot" style="background:${colorForLabel(s.label)}"></span>`+
       `<span class="who"><div class="nm">${esc(s.label)}</div><div class="em">${esc(s.calendarName||"")}</div></span>`;
     box.appendChild(row);
@@ -1311,7 +1311,16 @@ function closeDelete(){ document.getElementById("delModal").classList.remove("op
 function submitDelete(){
   if(!DEL_EV) return;
   const srcs=(DEL_EV.sources||[]).filter(s=>s.eventId);
-  const chosen=[...document.querySelectorAll(".delsrc")].filter(c=>c.checked).map(c=>srcs[Number(c.dataset.i)]);
+  // Identify each row by (event, calendar), never by position. Position drifts
+  // if either filter changes; and the event id ALONE is not unique — Google
+  // gives an invited event the same id on every attendee's calendar, so
+  // matching on it would happily delete from the wrong one. The pair fails
+  // safe: the worst case is finding no source at all.
+  const chosen=[...document.querySelectorAll("#delRows .acct")]
+    .map(row=>row.querySelector(".delsrc"))
+    .filter(c=>c&&c.checked)
+    .map(c=>srcs.find(s=>s.eventId===c.dataset.eid&&(s.calendarId||"")===c.dataset.cal))
+    .filter(Boolean);
   if(!chosen.length){ toast("Pick at least one calendar",true); return; }
   const ser=document.getElementById("scope-ser");
   const scope=(ser&&ser.checked)?"series":"occurrence";
@@ -1348,7 +1357,7 @@ function openEdit(ev){
     const why=s.editable?"":'<div class="em">Only the organizer can edit this</div>';
     // Carry the id, not a position: an index into an array re-derived at submit
     // time writes to the WRONG calendar the moment either filter drifts.
-    row.innerHTML=`<input type="checkbox" class="editsrc" data-eid="${esc(s.eventId)}"${s.editable?" checked":" disabled"}>`+
+    row.innerHTML=`<input type="checkbox" class="editsrc" data-eid="${esc(s.eventId)}" data-cal="${esc(s.calendarId||"")}"${s.editable?" checked":" disabled"}>`+
       `<span class="dot" style="background:${colorForLabel(s.label)}"></span>`+
       `<span class="who"><div class="nm">${esc(s.label)}</div>`+
       `<div class="em">${esc(s.calendarName||"")}</div>${why}</span>`;
@@ -1375,7 +1384,7 @@ function submitEdit(){
   const chosen=[...document.querySelectorAll("#editRows .acct")]
     .map(row=>row.querySelector(".editsrc"))
     .filter(c=>c&&c.checked)
-    .map(c=>srcs.find(s=>s.eventId===c.dataset.eid))
+    .map(c=>srcs.find(s=>s.eventId===c.dataset.eid&&(s.calendarId||"")===c.dataset.cal))
     .filter(Boolean);
   if(!chosen.length){ toast("Pick at least one calendar",true); return; }
   const now=editForm(), before=EDIT_BEFORE||{};

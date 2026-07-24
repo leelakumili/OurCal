@@ -1834,6 +1834,29 @@ class TestPageStructure(unittest.TestCase):
         self.assertNotIn('class="editsrc" data-i=', ourcal.PAGE)
         self.assertIn("s.eventId===c.dataset.eid", ourcal.PAGE)
 
+    def test_delete_targets_calendars_by_identity_not_position(self):
+        # Deleting is the higher-stakes half of the same bug: a drifted index
+        # would remove someone's event from the WRONG calendar, irreversibly
+        # from the user's point of view.
+        self.assertIn('class="delsrc" checked data-eid=', ourcal.PAGE)
+        self.assertNotIn('class="delsrc" checked data-i=', ourcal.PAGE)
+
+    def test_rows_are_identified_by_event_AND_calendar(self):
+        # Google gives an invited event the SAME id on every attendee's
+        # calendar, so the id alone does not identify a source. Matching on it
+        # would resolve every checkbox to the first calendar and write to the
+        # wrong one. Both write paths must compare the pair.
+        self.assertIn("data-cal=", ourcal.PAGE)
+        self.assertIn('s.eventId===c.dataset.eid&&(s.calendarId||"")===c.dataset.cal',
+                      ourcal.PAGE)
+        self.assertNotIn("s.eventId===c.dataset.eid)", ourcal.PAGE)  # id alone
+
+    def test_delete_rows_are_scoped_to_their_own_picker(self):
+        # An unscoped selector once picked up rows from a different modal and
+        # broke unrelated buttons; both write paths must stay scoped.
+        self.assertIn('querySelectorAll("#delRows .acct")', ourcal.PAGE)
+        self.assertNotIn('querySelectorAll(".delsrc")', ourcal.PAGE)
+
     def test_edit_sends_only_the_fields_the_user_touched(self):
         self.assertIn("EDIT_BEFORE", ourcal.PAGE)
         self.assertIn("changed", ourcal.PAGE)

@@ -164,7 +164,7 @@ VERSION = "1.0.0"
 python3 -m unittest discover tests -v
 ```
 
-206 tests, no Google credentials or network needed — the suite runs in demo mode
+209 tests, no Google credentials or network needed — the suite runs in demo mode
 against in-memory fixtures.
 
 | Task | Command |
