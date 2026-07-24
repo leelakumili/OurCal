@@ -105,7 +105,7 @@ PORT = 8756
 python3 -m unittest discover tests -v
 ```
 
-190 tests, no Google credentials or network needed — the suite runs in demo
+193 tests, no Google credentials or network needed — the suite runs in demo
 mode against in-memory fixtures.
 
 ## Privacy

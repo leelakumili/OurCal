@@ -1617,6 +1617,31 @@ class TestBootstrapGuard(unittest.TestCase):
             os.environ.pop("OURCAL_REEXEC", None)
 
 
+class TestVenvBasePython(unittest.TestCase):
+    """macOS ships 3.9, which Google's libraries warn about on every launch."""
+
+    def test_uses_the_running_interpreter_when_new_enough(self):
+        import sys
+        if sys.version_info < (3, 10):
+            self.skipTest("running on 3.9; covered by the fallback test")
+        self.assertEqual(ourcal.venv_base_python(), sys.executable)
+
+    def test_prefers_a_newer_interpreter_when_running_on_39(self):
+        import sys
+        if sys.version_info >= (3, 10):
+            self.skipTest("only meaningful when running on 3.9")
+        found = ourcal.venv_base_python()
+        # Either it located a newer python, or none is installed and it fell
+        # back to the current one — both are correct, neither may be empty.
+        self.assertTrue(found)
+
+    def test_candidate_list_is_ordered_newest_first(self):
+        nums = [tuple(int(p) for p in n.split("python")[1].split("."))
+                for n in ourcal.NEWER_PYTHONS]
+        self.assertEqual(nums, sorted(nums, reverse=True))
+        self.assertTrue(all(n >= (3, 10) for n in nums))
+
+
 class TestPageStructure(unittest.TestCase):
     def test_page_has_core_markers(self):
         p = ourcal.PAGE

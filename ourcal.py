@@ -1522,13 +1522,39 @@ def needs_bootstrap():
     return not _google_importable()
 
 
+NEWER_PYTHONS = ["python3.14", "python3.13", "python3.12", "python3.11",
+                 "python3.10"]
+
+
+def venv_base_python():
+    """Which interpreter the venv should be built on.
+
+    macOS ships 3.9, which Google's client libraries and urllib3 have both
+    moved past — they print end-of-life warnings on every single launch. The
+    app runs fine on 3.9, so this is presentation, not capability: prefer a
+    newer interpreter when the machine has one, and fall back silently when it
+    doesn't. Returns an absolute path, since the venv outlives this process.
+    """
+    import shutil
+    import sys
+    if sys.version_info >= (3, 10):
+        return sys.executable
+    for name in NEWER_PYTHONS:
+        found = shutil.which(name)
+        if found:
+            return found
+    return sys.executable
+
+
 def ensure_deps():
     if not needs_bootstrap():
         return
     import subprocess
-    import venv
     print("OurCal: first-run setup — creating .ourcal-venv and installing deps…")
-    venv.EnvBuilder(with_pip=True).create(VENV_DIR)
+    # Build via subprocess, not venv.EnvBuilder: EnvBuilder is bound to the
+    # *running* interpreter, so a 3.9 launch would keep re-pinning the venv
+    # back to 3.9 on every run, undoing any upgrade.
+    subprocess.check_call([venv_base_python(), "-m", "venv", VENV_DIR])
     py = os.path.join(VENV_DIR, "bin", "python")
     subprocess.check_call([py, "-m", "pip", "install", "-q", "--upgrade", "pip"])
     subprocess.check_call([py, "-m", "pip", "install", "-q", *DEPS])
