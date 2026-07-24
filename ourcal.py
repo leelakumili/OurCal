@@ -9,6 +9,55 @@ from zoneinfo import ZoneInfo
 
 # ── CONFIG ──────────────────────────────────────────────────────────────
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/OurCal")
+# Files that are yours, not the app's: they must outlive any reinstall.
+USER_FILES = ["credentials.json", "accounts.json"]
+
+
+def is_bundled():
+    """True when running from inside a packaged .app rather than as a script."""
+    import sys
+    return getattr(sys, "frozen", False)
+
+
+def data_dir():
+    """Where this install keeps credentials and tokens.
+
+    A packaged .app is replaced wholesale on every update and is code-signed,
+    so anything written inside the bundle is both erased and signature-breaking.
+    Bundled installs therefore keep user state in Application Support. Running
+    from a source checkout keeps using the checkout — that is where the setup
+    guide tells people to drop credentials.json, and it keeps a clone
+    self-contained.
+    """
+    return SUPPORT_DIR if is_bundled() else APP_DIR
+
+
+def user_path(name):
+    return os.path.join(data_dir(), name)
+
+
+def migrate_user_files():
+    """Move a source checkout's credentials and tokens into Application Support.
+
+    Only ever runs for a bundled install, and never overwrites: the first launch
+    of the .app adopts the sign-ins you already had, and nothing is lost if you
+    keep using the checkout too. Copies rather than moves for the same reason.
+    """
+    if not is_bundled():
+        return []
+    import glob
+    import shutil
+    os.makedirs(SUPPORT_DIR, exist_ok=True)
+    moved = []
+    names = list(USER_FILES) + [os.path.basename(p) for p in
+                                glob.glob(os.path.join(APP_DIR, "token_*.json"))]
+    for name in names:
+        src, dst = os.path.join(APP_DIR, name), os.path.join(SUPPORT_DIR, name)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            moved.append(name)
+    return moved
 
 
 def slug(label):
@@ -66,7 +115,11 @@ def load_accounts(path):
         return None
 
 
-ACCOUNTS = load_accounts(os.path.join(APP_DIR, "accounts.json")) or ACCOUNTS
+# Migration has to happen before the accounts file is read, not in main():
+# ACCOUNTS is resolved at import, so a bundled first launch would otherwise
+# look in an empty Application Support and fall back to placeholders.
+migrate_user_files()
+ACCOUNTS = load_accounts(user_path("accounts.json")) or ACCOUNTS
 
 TIMEZONE = "America/Los_Angeles"
 DAYS_AHEAD = 30
@@ -543,7 +596,7 @@ def should_include_calendar(item):
 
 
 def token_path(label):
-    return os.path.join(APP_DIR, f"token_{slug(label)}.json")
+    return user_path(f"token_{slug(label)}.json")
 
 
 def primary_email(cals):
@@ -567,7 +620,7 @@ def account_mismatch(label, expected, cals):
     if not actual or actual == (expected or "").strip().lower():
         return None
     return (f"signed in as {actual}, not {expected} — delete "
-            f"token_{slug(label)}.json, restart, and pick {expected}")
+            f"{token_path(label)}, restart, and pick {expected}")
 
 
 def creds_for(label, email):
@@ -584,10 +637,10 @@ def creds_for(label, email):
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     else:
-        cred_file = os.path.join(APP_DIR, "credentials.json")
+        cred_file = user_path("credentials.json")
         if not os.path.exists(cred_file):
             raise FileNotFoundError(
-                "credentials.json is missing from the OurCal folder — "
+                f"credentials.json is missing from {data_dir()} — "
                 "complete Steps 1-4 of SETUP_GUIDE.md")
         # Name the account before the browser opens: the prompts are identical
         # otherwise, and picking the wrong one silently mislabels its events.

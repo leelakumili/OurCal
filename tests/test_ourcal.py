@@ -1617,6 +1617,72 @@ class TestBootstrapGuard(unittest.TestCase):
             os.environ.pop("OURCAL_REEXEC", None)
 
 
+class TestDataDir(unittest.TestCase):
+    """A packaged .app is replaced on every update and is code-signed, so user
+    state cannot live inside it."""
+
+    def _bundled(self, yes):
+        real = ourcal.is_bundled
+        ourcal.is_bundled = lambda: yes
+        self.addCleanup(lambda: setattr(ourcal, "is_bundled", real))
+
+    def test_source_checkout_keeps_state_beside_the_script(self):
+        self._bundled(False)
+        self.assertEqual(ourcal.data_dir(), ourcal.APP_DIR)
+
+    def test_bundled_app_uses_application_support(self):
+        self._bundled(True)
+        self.assertEqual(ourcal.data_dir(), ourcal.SUPPORT_DIR)
+
+    def test_application_support_path_is_under_the_user_library(self):
+        self.assertTrue(ourcal.SUPPORT_DIR.endswith(
+            "Library/Application Support/OurCal"))
+        self.assertTrue(os.path.isabs(ourcal.SUPPORT_DIR))
+        self.assertNotIn("~", ourcal.SUPPORT_DIR)   # expanded, not literal
+
+    def test_token_path_follows_the_data_dir(self):
+        self._bundled(True)
+        self.assertEqual(ourcal.token_path("Leela K"),
+                         os.path.join(ourcal.SUPPORT_DIR, "token_leela-k.json"))
+        self._bundled(False)
+        self.assertEqual(ourcal.token_path("Leela K"),
+                         os.path.join(ourcal.APP_DIR, "token_leela-k.json"))
+
+    def test_migration_is_a_no_op_for_a_source_checkout(self):
+        # The checkout IS the data dir; copying onto itself would be pointless
+        # and could clobber live tokens.
+        self._bundled(False)
+        self.assertEqual(ourcal.migrate_user_files(), [])
+
+    def test_migration_copies_without_overwriting(self):
+        import shutil
+        import tempfile
+        src = tempfile.mkdtemp()
+        dst = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, src, True)
+        self.addCleanup(shutil.rmtree, dst, True)
+        with open(os.path.join(src, "credentials.json"), "w") as f:
+            f.write("fresh")
+        with open(os.path.join(src, "token_leela.json"), "w") as f:
+            f.write("fresh")
+        with open(os.path.join(dst, "token_leela.json"), "w") as f:
+            f.write("ALREADY THERE")      # an existing sign-in must survive
+
+        self._bundled(True)
+        real_app, real_sup = ourcal.APP_DIR, ourcal.SUPPORT_DIR
+        ourcal.APP_DIR, ourcal.SUPPORT_DIR = src, dst
+        self.addCleanup(lambda: setattr(ourcal, "APP_DIR", real_app))
+        self.addCleanup(lambda: setattr(ourcal, "SUPPORT_DIR", real_sup))
+
+        moved = ourcal.migrate_user_files()
+        self.assertIn("credentials.json", moved)
+        self.assertNotIn("token_leela.json", moved)          # not overwritten
+        with open(os.path.join(dst, "token_leela.json")) as f:
+            self.assertEqual(f.read(), "ALREADY THERE")
+        with open(os.path.join(src, "credentials.json")) as f:
+            self.assertEqual(f.read(), "fresh")              # copied, not moved
+
+
 class TestVenvBasePython(unittest.TestCase):
     """macOS ships 3.9, which Google's libraries warn about on every launch."""
 
