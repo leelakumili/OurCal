@@ -205,6 +205,10 @@ def merge_events(events):
             m["guests"] = max(m["guests"], ev["guests"])
             m["join"] = m["join"] or ev["join"]
             m["location"] = m["location"] or ev["location"]
+            # Without this the row shows only the first copy's description, and
+            # the Edit modal — which prefills from the row — would offer to
+            # overwrite every other copy's notes with that blank.
+            m["notes"] = m["notes"] or ev["notes"]
     out = [merged[k] for k in order]
     out.sort(key=_event_instant)
     return out
@@ -252,6 +256,9 @@ def target_id(source, scope):
     return source.get("eventId", "")
 
 
+_TIME_KEYS = ("date", "startTime", "endTime", "allDay")
+
+
 def build_patch_body(payload):
     """Edit-payload → Google events.patch body.
 
@@ -260,12 +267,43 @@ def build_patch_body(payload):
     not silently restate axes they never opened. Location and notes are sent
     even when empty — patch ignores absent keys, so omitting them would make
     clearing a location impossible.
+
+    `payload["changed"]`, when present, lists the form keys the user actually
+    moved off their prefill, and everything else is dropped. This matters
+    because a merged row flattens its copies: it shows the *first* copy's notes
+    and location, so an untouched Notes box says nothing about what the other
+    copies hold. Sending the whole form to every ticked calendar would push
+    that flattened view over their real values. A missing `changed` means "no
+    caller told us" and still emits the full body.
     """
     body = build_event_body(payload, blocking=True, detail="full")
     body.pop("transparency", None)
     body.pop("visibility", None)
     body["location"] = payload.get("location") or ""
     body["description"] = payload.get("notes") or ""
+    changed = payload.get("changed")
+    if changed is not None:
+        if "title" not in changed:
+            body.pop("summary", None)
+        if not any(k in changed for k in _TIME_KEYS):
+            body.pop("start", None)
+            body.pop("end", None)
+        if "location" not in changed:
+            body.pop("location", None)
+        if "notes" not in changed:
+            body.pop("description", None)
+    # patch() MERGES nested objects instead of replacing them, so a new
+    # {"date": ...} would land next to the stored {"dateTime", "timeZone"} and
+    # the API would reject an event that claims to be both. An explicit null is
+    # Google's delete-this-field signal; json.dumps writes it as `null`.
+    for k in ("start", "end"):
+        if k not in body:
+            continue
+        if payload.get("allDay"):
+            body[k]["dateTime"] = None
+            body[k]["timeZone"] = None
+        else:
+            body[k]["date"] = None
     return body
 
 
@@ -444,13 +482,22 @@ def _demo_update(payload):
         if not hit:
             store.append(e)
             continue
+        # Only the keys the body actually carries may land: a partial patch
+        # leaves everything else at its stored value, exactly as Google does.
         moved = dict(e)          # copy-on-write, as merge_events does
-        moved["title"] = body["summary"]
-        moved["allDay"] = "date" in body["start"]
-        moved["start"] = body["start"].get("date") or body["start"]["dateTime"]
-        moved["end"] = body["end"].get("date") or body["end"]["dateTime"]
-        moved["location"] = body["location"] or None
-        moved["notes"] = body["description"] or None
+        if "summary" in body:
+            moved["title"] = body["summary"]
+        if "start" in body and "end" in body:
+            # Read the dates back by hand rather than calling normalize():
+            # normalize defaults a missing transparency to "opaque", which
+            # would force busy=True on every event anyone edits.
+            moved["allDay"] = bool(body["start"].get("date"))
+            moved["start"] = body["start"].get("date") or body["start"]["dateTime"]
+            moved["end"] = body["end"].get("date") or body["end"]["dateTime"]
+        if "location" in body:
+            moved["location"] = body["location"] or None
+        if "description" in body:
+            moved["notes"] = body["description"] or None
         store.append(moved)
     _DEMO_STORE = store
     return {"ok": True,
@@ -818,6 +865,9 @@ PAGE = r"""<!doctype html>
   .mini{font-size:11px;padding:3px 9px;border-radius:7px;color:var(--muted)}
   .mini:hover{color:var(--text)}
   .mini.danger:hover{color:#d1443c;border-color:#d1443c}
+  /* .mini sets its own color, which beats the browser's default disabled look —
+     without this a dead Edit button is pixel-identical to a live one. */
+  .mini:disabled,.mini:disabled:hover{opacity:.45;cursor:not-allowed;color:var(--muted);border-color:var(--border)}
   .hint{font-size:11px;color:var(--muted);margin-top:5px}
   .delsum{background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-bottom:14px}
   .delsum .dt{font-weight:600}
@@ -918,7 +968,7 @@ PAGE = r"""<!doctype html>
     <div class="field" id="wrap-escope" style="display:none">
       <label>Scope</label>
       <div class="scoperow"><input type="radio" name="escope" id="escope-occ" value="eoccurrence" checked><label for="escope-occ" style="color:var(--text)">This occurrence only</label></div>
-      <div class="scoperow"><input type="radio" name="escope" id="escope-ser" value="eseries"><label for="escope-ser" style="color:var(--text)">The entire series <span class="sub">— changing the date shifts every occurrence</span></label></div>
+      <div class="scoperow"><input type="radio" name="escope" id="escope-ser" value="eseries"><label for="escope-ser" style="color:var(--text)">The entire series <span class="sub">— changing the date rebases the series to start on that date</span></label></div>
     </div>
     <div class="hint">Guests are never emailed about edits made here.</div>
     <div class="actions">
@@ -939,6 +989,7 @@ let mode = "copies";
 let ROWS = [];        // events as currently rendered, indexed by row buttons
 let DEL_EV = null;    // event awaiting delete confirmation
 let EDIT_EV = null;   // event awaiting edit
+let EDIT_BEFORE = null; // the edit form exactly as it was prefilled
 
 function isDark(){
   const t = document.documentElement.getAttribute("data-theme");
@@ -1246,10 +1297,12 @@ function openEdit(ev){
   document.getElementById("e-notes").value=ev.notes||"";
   const srcs=(ev.sources||[]).filter(s=>s.eventId);
   const box=document.getElementById("editRows"); box.innerHTML="";
-  srcs.forEach((s,i)=>{
+  srcs.forEach(s=>{
     const row=document.createElement("div"); row.className="acct";
     const why=s.editable?"":'<div class="em">Only the organizer can edit this</div>';
-    row.innerHTML=`<input type="checkbox" class="editsrc" data-i="${i}"${s.editable?" checked":" disabled"}>`+
+    // Carry the id, not a position: an index into an array re-derived at submit
+    // time writes to the WRONG calendar the moment either filter drifts.
+    row.innerHTML=`<input type="checkbox" class="editsrc" data-eid="${esc(s.eventId)}"${s.editable?" checked":" disabled"}>`+
       `<span class="dot" style="background:${colorForLabel(s.label)}"></span>`+
       `<span class="who"><div class="nm">${esc(s.label)}</div>`+
       `<div class="em">${esc(s.calendarName||"")}</div>${why}</span>`;
@@ -1258,21 +1311,38 @@ function openEdit(ev){
   const recurring=srcs.some(s=>s.seriesId);
   document.getElementById("wrap-escope").style.display=recurring?"":"none";
   document.getElementById("escope-occ").checked=true;
+  // Snapshot what the user is about to see, read back out of the DOM so it is
+  // exactly that. submitEdit diffs against this to send only real edits.
+  EDIT_BEFORE=editForm();
   document.getElementById("editModal").classList.add("open");
 }
-function closeEdit(){ document.getElementById("editModal").classList.remove("open"); EDIT_EV=null; }
+/* The edit form's current values, in the shape the API expects. */
+function editForm(){
+  return {title:val("e-title"), date:val("e-date"), startTime:val("e-start"),
+          endTime:val("e-end"), allDay:document.getElementById("e-allday").checked,
+          location:val("e-loc"), notes:val("e-notes")};
+}
+function closeEdit(){ document.getElementById("editModal").classList.remove("open"); EDIT_EV=null; EDIT_BEFORE=null; }
 function submitEdit(){
   if(!EDIT_EV) return;
   const srcs=(EDIT_EV.sources||[]).filter(s=>s.eventId);
   const chosen=[...document.querySelectorAll("#editRows .acct")]
     .map(row=>row.querySelector(".editsrc"))
-    .filter(c=>c&&c.checked).map(c=>srcs[Number(c.dataset.i)]);
+    .filter(c=>c&&c.checked)
+    .map(c=>srcs.find(s=>s.eventId===c.dataset.eid))
+    .filter(Boolean);
   if(!chosen.length){ toast("Pick at least one calendar",true); return; }
+  const now=editForm(), before=EDIT_BEFORE||{};
+  // A merged row shows only its first copy's notes and location, so an
+  // untouched field says nothing about what the other copies hold. Name what
+  // actually moved and the server leaves the rest alone.
+  const changed=Object.keys(now).filter(k=>now[k]!==before[k]);
+  if(!changed.length){ toast("No changes to save"); return; }
   const ser=document.getElementById("escope-ser");
   const payload={
-    title:val("e-title"), date:val("e-date"), startTime:val("e-start"),
-    endTime:val("e-end"), allDay:document.getElementById("e-allday").checked,
-    location:val("e-loc"), notes:val("e-notes"),
+    title:now.title, date:now.date, startTime:now.startTime,
+    endTime:now.endTime, allDay:now.allDay,
+    location:now.location, notes:now.notes, changed:changed,
     scope:(ser&&ser.checked)?"series":"occurrence", sources:chosen};
   const btn=document.getElementById("editSaveBtn"); btn.disabled=true;
   fetch("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})

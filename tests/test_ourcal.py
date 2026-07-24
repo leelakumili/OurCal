@@ -1,4 +1,4 @@
-import copy, os, unittest
+import copy, json, os, unittest
 os.environ.setdefault("OURCAL_DEMO", "1")  # keep imports side-effect free / no google
 import ourcal
 
@@ -276,9 +276,11 @@ class TestSources(unittest.TestCase):
 
 class TestMerge(unittest.TestCase):
     def _n(self, uid, start, label, busy=True, guests=0, join=None, cal="C"):
+        # Mirrors normalize()'s output, which always emits `notes`.
         return {"uid": uid, "title": "M", "start": start, "end": start,
                 "allDay": False, "busy": busy, "location": None, "join": join,
-                "labels": [label], "calendars": [cal], "guests": guests}
+                "notes": None, "labels": [label], "calendars": [cal],
+                "guests": guests}
 
     def test_same_uid_start_merges_labels(self):
         a = self._n("u1", "2026-07-23T09:00:00-07:00", "Personal", busy=False)
@@ -331,9 +333,10 @@ class TestMergeSeparateCopies(unittest.TestCase):
 
     def _n(self, uid, label, title="Dentist appointment",
            start="2026-07-24T11:00:00-07:00", end="2026-07-24T12:00:00-07:00",
-           all_day=False):
+           all_day=False, notes=None, location=None):
         return {"uid": uid, "title": title, "start": start, "end": end,
-                "allDay": all_day, "busy": True, "location": None, "join": None,
+                "allDay": all_day, "busy": True, "location": location,
+                "join": None, "notes": notes,
                 "labels": [label], "calendars": [label + " cal"], "guests": 0,
                 "sources": [{"label": label, "calendarId": label + "@x",
                              "eventId": uid, "seriesId": None,
@@ -395,6 +398,35 @@ class TestMergeSeparateCopies(unittest.TestCase):
 
     def test_does_not_mutate_inputs(self):
         a, b = self._n("u1", "Personal"), self._n("u2", "Work")
+        a_snap, b_snap = copy.deepcopy(a), copy.deepcopy(b)
+        ourcal.merge_events([a, b])
+        self.assertEqual(a, a_snap)
+        self.assertEqual(b, b_snap)
+
+    def test_notes_from_a_later_copy_survive_the_merge(self):
+        # The Edit modal prefills from the merged row. A row that dropped the
+        # only copy carrying a description would prefill Notes empty, and
+        # saving would push that emptiness back over the real description.
+        bare = self._n("u1", "Personal")
+        detailed = self._n("u2", "Work", notes="Dial 1234 to join")
+        out = ourcal.merge_events([bare, detailed])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["notes"], "Dial 1234 to join")
+
+    def test_first_non_empty_notes_wins(self):
+        a = self._n("u1", "Personal", notes="Bring x-rays")
+        b = self._n("u2", "Work", notes="Different text")
+        self.assertEqual(ourcal.merge_events([a, b])[0]["notes"], "Bring x-rays")
+
+    def test_location_from_a_later_copy_survives_the_merge(self):
+        bare = self._n("u1", "Personal")
+        placed = self._n("u2", "Work", location="Suite 207")
+        self.assertEqual(ourcal.merge_events([bare, placed])[0]["location"],
+                         "Suite 207")
+
+    def test_merging_notes_does_not_mutate_inputs(self):
+        a = self._n("u1", "Personal")
+        b = self._n("u2", "Work", notes="n")
         a_snap, b_snap = copy.deepcopy(a), copy.deepcopy(b)
         ourcal.merge_events([a, b])
         self.assertEqual(a, a_snap)
@@ -610,6 +642,67 @@ class TestDemoUpdate(unittest.TestCase):
         self.assertTrue(r["error"])
         self.assertEqual(ourcal.get_events()["events"], before)
 
+    def test_moving_an_all_day_event_keeps_it_all_day(self):
+        # _demo_update branches on all-day, and the patch body for it carries
+        # explicit nulls to clear any stored dateTime — the least-exercised path.
+        srcs = self._sources_of("Offsite (all day)")
+        r = ourcal.update_events({
+            "title": "Offsite (all day)", "date": "2026-09-20",
+            "startTime": "", "endTime": "", "allDay": True,
+            "location": "", "notes": "", "scope": "occurrence",
+            "sources": srcs})
+        self.assertTrue(r["ok"])
+        moved = self._find("Offsite (all day)")[0]
+        self.assertTrue(moved["allDay"])
+        self.assertEqual(moved["start"], "2026-09-20")
+        self.assertEqual(moved["end"], "2026-09-21")   # end date is exclusive
+
+    def test_a_timed_event_can_become_all_day(self):
+        srcs = self._sources_of("Team Standup")
+        ourcal.update_events({
+            "title": "Team Standup", "date": "2026-09-20", "startTime": "09:00",
+            "endTime": "09:30", "allDay": True, "location": "", "notes": "",
+            "scope": "occurrence", "sources": srcs})
+        moved = self._find("Team Standup")[0]
+        self.assertTrue(moved["allDay"])
+        self.assertEqual(moved["start"], "2026-09-20")
+
+    def test_untouched_fields_keep_their_stored_value(self):
+        # A merged row prefills from its first copy, so an untouched Notes box
+        # may hold nothing while the real event holds a description. Only the
+        # keys named in `changed` may land.
+        srcs = self._sources_of("Team Standup")
+        before = self._find("Team Standup")[0]
+        ourcal.update_events({
+            "title": "Renamed standup", "date": "2026-09-09",
+            "startTime": "15:00", "endTime": "15:30", "allDay": False,
+            "location": "", "notes": "", "scope": "occurrence",
+            "changed": ["title"], "sources": srcs})
+        moved = self._find("Renamed standup")[0]
+        self.assertEqual(moved["start"], before["start"])
+        self.assertEqual(moved["end"], before["end"])
+        self.assertEqual(moved["location"], before["location"])
+        self.assertEqual(moved["notes"], before["notes"])
+
+    def test_a_time_only_change_keeps_the_title(self):
+        srcs = self._sources_of("Team Standup")
+        ourcal.update_events({
+            "title": "Team Standup", "date": "2026-09-09", "startTime": "15:00",
+            "endTime": "15:30", "allDay": False, "location": "", "notes": "",
+            "scope": "occurrence", "changed": ["startTime", "endTime", "date"],
+            "sources": srcs})
+        moved = self._find("Team Standup")[0]
+        self.assertTrue(moved["start"].startswith("2026-09-09T15:00"))
+
+    def test_clearing_a_location_still_clears_it(self):
+        srcs = self._sources_of("Team Standup")
+        self.assertEqual(self._find("Team Standup")[0]["location"], "Zoom")
+        ourcal.update_events({
+            "title": "Team Standup", "date": "2026-09-09", "startTime": "15:00",
+            "endTime": "15:30", "allDay": False, "location": "", "notes": "",
+            "scope": "occurrence", "changed": ["location"], "sources": srcs})
+        self.assertIsNone(self._find("Team Standup")[0]["location"])
+
 
 class TestCalendarFilter(unittest.TestCase):
     def test_includes_selected(self):
@@ -673,14 +766,41 @@ class TestBuildPatchBody(unittest.TestCase):
         b = ourcal.build_patch_body(self._p())
         self.assertEqual(b["summary"], "Dentist")
         self.assertEqual(b["start"], {"dateTime": "2026-07-24T11:00:00",
-                                      "timeZone": ourcal.TIMEZONE})
+                                      "timeZone": ourcal.TIMEZONE,
+                                      "date": None})
         self.assertEqual(b["end"], {"dateTime": "2026-07-24T12:00:00",
-                                    "timeZone": ourcal.TIMEZONE})
+                                    "timeZone": ourcal.TIMEZONE,
+                                    "date": None})
 
     def test_all_day_uses_exclusive_end_date(self):
         b = ourcal.build_patch_body(self._p(allDay=True))
-        self.assertEqual(b["start"], {"date": "2026-07-24"})
-        self.assertEqual(b["end"], {"date": "2026-07-25"})
+        self.assertEqual(b["start"], {"date": "2026-07-24",
+                                      "dateTime": None, "timeZone": None})
+        self.assertEqual(b["end"], {"date": "2026-07-25",
+                                    "dateTime": None, "timeZone": None})
+
+    def test_timed_edit_clears_a_stored_all_day_date(self):
+        # events.patch MERGES nested objects rather than replacing them, so
+        # patching {"dateTime": ...} onto a stored {"date": ...} would leave an
+        # object carrying both — which the API rejects. null is the delete signal.
+        b = ourcal.build_patch_body(self._p())
+        self.assertIn("date", b["start"])
+        self.assertIsNone(b["start"]["date"])
+        self.assertIsNone(b["end"]["date"])
+
+    def test_all_day_edit_clears_the_stored_date_time(self):
+        b = ourcal.build_patch_body(self._p(allDay=True))
+        self.assertIsNone(b["start"]["dateTime"])
+        self.assertIsNone(b["start"]["timeZone"])
+        self.assertIsNone(b["end"]["dateTime"])
+        self.assertIsNone(b["end"]["timeZone"])
+
+    def test_clearing_nulls_serialize_as_json_null(self):
+        # Google reads an explicit JSON null as "delete this field"; an absent
+        # key means "leave it alone". The distinction only survives if the
+        # None actually reaches the wire.
+        b = ourcal.build_patch_body(self._p(allDay=True))
+        self.assertIn('"dateTime": null', json.dumps(b))
 
     def test_never_touches_busy_free_or_privacy(self):
         # The user edited a title; silently flipping the event to "busy"
@@ -705,6 +825,105 @@ class TestBuildPatchBody(unittest.TestCase):
 
     def test_does_not_mutate_the_payload(self):
         p = self._p()
+        snap = copy.deepcopy(p)
+        ourcal.build_patch_body(p)
+        self.assertEqual(p, snap)
+
+
+class TestBuildPatchBodyChangedFields(unittest.TestCase):
+    """Send only what the user actually touched.
+
+    A merged row flattens its copies: the row shows the first copy's notes and
+    location, so the modal prefills what the *other* copies do not contain.
+    Sending every field to every copy would overwrite their real values with
+    the row's flattened view. `changed` is the list of keys whose value the
+    user moved off the prefill; everything else stays absent, and patch leaves
+    absent keys alone.
+    """
+
+    def _p(self, **kw):
+        p = {"title": "Dentist", "date": "2026-07-24", "startTime": "11:00",
+             "endTime": "12:00", "allDay": False, "location": "", "notes": ""}
+        p.update(kw)
+        return p
+
+    def test_no_changed_key_emits_everything(self):
+        # Back-compat: any caller that does not report what changed still gets
+        # the full body it always got.
+        b = ourcal.build_patch_body(self._p())
+        for k in ["summary", "start", "end", "location", "description"]:
+            self.assertIn(k, b)
+
+    def test_title_only_edit_sends_only_the_title(self):
+        b = ourcal.build_patch_body(self._p(changed=["title"]))
+        self.assertEqual(b["summary"], "Dentist")
+        for k in ["start", "end", "location", "description"]:
+            self.assertNotIn(k, b)
+
+    def test_title_only_edit_leaves_a_recurrence_alone(self):
+        # The date field is prefilled from the occurrence being edited, not the
+        # series' first instance. With series scope the patch addresses the
+        # recurring master, whose start IS its first instance — so an absolute
+        # start would rebase the whole series onto today and erase every
+        # occurrence before it.
+        b = ourcal.build_patch_body(self._p(changed=["title"]))
+        self.assertNotIn("start", b)
+
+    def test_date_change_sends_both_start_and_end(self):
+        b = ourcal.build_patch_body(self._p(changed=["date"]))
+        self.assertIn("start", b)
+        self.assertIn("end", b)
+        self.assertNotIn("summary", b)
+
+    def test_time_change_sends_start_and_end(self):
+        for key in ["startTime", "endTime", "allDay"]:
+            b = ourcal.build_patch_body(self._p(changed=[key]))
+            self.assertIn("start", b, key)
+            self.assertIn("end", b, key)
+
+    def test_location_only_edit_sends_only_the_location(self):
+        b = ourcal.build_patch_body(self._p(location="Suite 207",
+                                            changed=["location"]))
+        self.assertEqual(b["location"], "Suite 207")
+        self.assertNotIn("description", b)
+        self.assertNotIn("summary", b)
+
+    def test_notes_only_edit_sends_only_the_description(self):
+        b = ourcal.build_patch_body(self._p(notes="Bring x-rays",
+                                            changed=["notes"]))
+        self.assertEqual(b["description"], "Bring x-rays")
+        self.assertNotIn("location", b)
+
+    def test_untouched_notes_are_never_sent(self):
+        # The whole point: a merged row prefills Notes empty because the copy
+        # that carried them was not the first one. Saving a time change must
+        # not push that emptiness onto the copy that has real notes.
+        b = ourcal.build_patch_body(self._p(notes="", changed=["startTime"]))
+        self.assertNotIn("description", b)
+
+    def test_clearing_a_field_still_clears_it(self):
+        # Changed-to-empty IS a change, so the key is sent as "".
+        b = ourcal.build_patch_body(self._p(location="", notes="",
+                                            changed=["location", "notes"]))
+        self.assertEqual(b["location"], "")
+        self.assertEqual(b["description"], "")
+
+    def test_nothing_changed_sends_nothing(self):
+        b = ourcal.build_patch_body(self._p(changed=[]))
+        self.assertEqual(b, {})
+
+    def test_start_and_end_still_carry_their_clearing_nulls(self):
+        b = ourcal.build_patch_body(self._p(allDay=True, changed=["allDay"]))
+        self.assertIsNone(b["start"]["dateTime"])
+        self.assertIsNone(b["end"]["timeZone"])
+
+    def test_still_never_touches_busy_free_or_privacy(self):
+        b = ourcal.build_patch_body(self._p(changed=["title", "date"]))
+        self.assertNotIn("transparency", b)
+        self.assertNotIn("visibility", b)
+
+    def test_does_not_mutate_the_payload(self):
+        p = self._p(changed=["title"])
         snap = copy.deepcopy(p)
         ourcal.build_patch_body(p)
         self.assertEqual(p, snap)
@@ -998,6 +1217,18 @@ class TestGoogleUpdateWiring(unittest.TestCase):
         r = ourcal._google_update(self._payload())
         self.assertIn("organizer", r["results"][0]["error"].lower())
 
+    def test_a_title_only_series_edit_does_not_move_the_recurrence(self):
+        # Patching a recurring master's start rewrites DTSTART, and every
+        # occurrence before the new date is gone with nothing to signal it.
+        # The date box is prefilled from the occurrence, so an untouched date
+        # must reach the wire as no date at all.
+        ourcal._google_update(self._payload(scope="series", changed=["title"]))
+        body = self.ops[0]["body"]
+        self.assertEqual(self.ops[0]["eventId"], "s1")
+        self.assertNotIn("start", body)
+        self.assertNotIn("end", body)
+        self.assertEqual(body["summary"], "Dentist")
+
     def test_missing_event_is_a_failure_not_a_success(self):
         # Unlike delete, where "already gone" achieved the goal, an edit that
         # cannot find its event did not land.
@@ -1161,7 +1392,7 @@ class TestAccountIdentity(unittest.TestCase):
             ourcal.account_mismatch("Fourth", "fourth@example.com", cals))
 
 
-import json, threading, urllib.error, urllib.request
+import threading, urllib.error, urllib.request
 
 
 class TestHttp(unittest.TestCase):
@@ -1344,6 +1575,22 @@ class TestUpdateEndpoint(unittest.TestCase):
         self.assertTrue(after[0]["start"].startswith("2026-09-09T15:00"))
         self.assertEqual(after[0]["location"], "Room 2")
 
+    def test_changed_list_survives_the_wire(self):
+        # The browser names the fields the user touched; if that list did not
+        # reach build_patch_body the whole form would be written back again.
+        standup = [e for e in self._events() if e["title"] == "Team Standup"][0]
+        self.assertEqual(standup["location"], "Zoom")
+        status, res = self._post("/api/update", {
+            "title": "Standup (renamed)", "date": "2026-09-09",
+            "startTime": "15:00", "endTime": "15:30", "allDay": False,
+            "location": "", "notes": "", "changed": ["title"],
+            "scope": "occurrence", "sources": standup["sources"]})
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        after = [e for e in self._events() if e["title"] == "Standup (renamed)"][0]
+        self.assertEqual(after["location"], "Zoom")       # untouched, so unsent
+        self.assertEqual(after["start"], standup["start"])
+
     def test_bad_payload_returns_ok_false_with_a_reason(self):
         standup = [e for e in self._events() if e["title"] == "Team Standup"][0]
         _, res = self._post("/api/update", {
@@ -1401,7 +1648,8 @@ class TestPageStructure(unittest.TestCase):
 
     def test_click_handlers_report_errors_instead_of_dying_silently(self):
         self.assertIn("function guard(", ourcal.PAGE)
-        for wired in ["guard(submit)", "guard(submitDelete)", "guard(openModal)"]:
+        for wired in ["guard(submit)", "guard(submitDelete)", "guard(openModal)",
+                      "guard(submitEdit)"]:
             self.assertIn(wired, ourcal.PAGE, f"unguarded handler: {wired}")
 
     def test_page_has_edit_dialog_markers(self):
@@ -1423,6 +1671,32 @@ class TestPageStructure(unittest.TestCase):
 
     def test_edit_button_is_disabled_when_nothing_is_editable(self):
         self.assertIn("canEdit", ourcal.PAGE)
+
+    def test_a_disabled_row_button_looks_disabled(self):
+        # .mini sets an explicit color, which beats the browser's default
+        # disabled styling — without a :disabled rule a dead Edit button is
+        # pixel-identical to a live one, and the explanatory title tooltip
+        # never appears on a tap.
+        self.assertIn(".mini:disabled", ourcal.PAGE)
+        self.assertIn("not-allowed", ourcal.PAGE)
+
+    def test_edit_targets_calendars_by_id_not_by_position(self):
+        # A positional index into a re-derived array silently addresses the
+        # WRONG CALENDAR if either filter expression drifts. Matching on
+        # eventId fails safe: worst case is finding no source at all.
+        self.assertIn('class="editsrc" data-eid=', ourcal.PAGE)
+        self.assertNotIn('class="editsrc" data-i=', ourcal.PAGE)
+        self.assertIn("s.eventId===c.dataset.eid", ourcal.PAGE)
+
+    def test_edit_sends_only_the_fields_the_user_touched(self):
+        self.assertIn("EDIT_BEFORE", ourcal.PAGE)
+        self.assertIn("changed", ourcal.PAGE)
+        self.assertIn("No changes to save", ourcal.PAGE)
+
+    def test_series_hint_says_the_date_rebases_the_series(self):
+        # "shifts every occurrence" reads like a translation; what actually
+        # happens is that every occurrence before the new date disappears.
+        self.assertIn("rebase", ourcal.PAGE.lower())
 
 
 if __name__ == "__main__":
