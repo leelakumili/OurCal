@@ -1,8 +1,8 @@
 # OurCal — Setup Guide
 
-OurCal unifies the calendars from all of your Google accounts into one local
-dashboard and lets you create events / busy-blocks across any selection of them.
-Everything runs on your own Mac — nothing is uploaded anywhere.
+OurCal unifies the calendars from all of your Google accounts into one
+dashboard and lets you create, edit, sync and delete events across any selection
+of them. Everything runs on your own Mac — nothing is uploaded anywhere.
 
 You can try the whole interface **right now, with zero setup**:
 
@@ -20,7 +20,9 @@ placeholder accounts** — it never contacts Google and ignores `accounts.json`.
 - An `accounts.json` listing the Google accounts you want unified.
 - A Google Cloud project with the **Calendar API** enabled.
 - An OAuth **consent screen** in *Testing* mode listing your accounts as test users.
-- A **Desktop OAuth client**, downloaded as `credentials.json` next to `ourcal.py`.
+- A **Desktop OAuth client**, downloaded as `credentials.json` (next to
+  `ourcal.py` when running from source, or in
+  `~/Library/Application Support/OurCal/` for the packaged Mac app).
 - One `token_<label>.json` per account, created automatically on first sign-in.
 
 ## Step 0 — List your accounts
@@ -199,7 +201,7 @@ deps on next run). `credentials.json` stays.
 
 ## Privacy
 
-OurCal is entirely local. The web UI is served only on `127.0.0.1` (your
-machine). Your `credentials.json` and OAuth tokens never leave your computer,
-and calendar data is fetched directly from Google to your machine and held only
-in memory. There is no OurCal server, no telemetry, and no third party.
+Everything runs on your own machine. The interface is served only on
+`127.0.0.1`. Your `credentials.json` and OAuth tokens never leave your computer,
+and calendar data is fetched straight from Google to you and held only in
+memory. There is no OurCal server, no telemetry, and no third party.
