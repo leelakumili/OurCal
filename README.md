@@ -204,5 +204,4 @@ run the tests.
 
 ## License
 
-Not yet licensed. Until a LICENSE file is added, default copyright applies and
-the code cannot be reused. See [CONTRIBUTING.md](CONTRIBUTING.md#license).
+[MIT](LICENSE) — use it, fork it, ship it. No warranty.

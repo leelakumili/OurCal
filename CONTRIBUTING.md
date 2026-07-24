@@ -86,7 +86,5 @@ git-ignored for exactly this reason.
 
 ## License
 
-This project does not yet carry a LICENSE file, which means default copyright
-applies and the code cannot legally be reused, modified or redistributed. Adding
-one is the maintainer's decision. Until then, please raise an issue before
-building anything substantial on top of it.
+Contributions are accepted under the [MIT License](LICENSE), the same terms the
+project ships under.
