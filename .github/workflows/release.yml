@@ -1,0 +1,101 @@
+name: Release
+
+# Two ways in: push a v* tag, or press the button in the Actions tab.
+# workflow_dispatch is what makes "release on demand" true — you do not have to
+# invent a tag just to get a build.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 1.0.1). Defaults to VERSION in ourcal.py."
+        required: false
+
+permissions:
+  contents: write        # needed to create the release and upload the .dmg
+
+jobs:
+  macos:
+    # macos-14 is Apple Silicon. Intel Macs would need a second job on macos-13.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check the version is consistent
+        # A tag that disagrees with the app's own VERSION produces a release
+        # whose contents report a different number than its name — confusing
+        # later, and impossible to tell apart after the fact.
+        run: |
+          FILE=$(python3 -c "import re;print(re.search(r'^VERSION = \"(.*)\"', open('ourcal.py').read(), re.M).group(1))")
+          echo "ourcal.py VERSION = $FILE"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            [ "$TAG" = "$FILE" ] || { echo "::error::tag v$TAG != VERSION $FILE in ourcal.py"; exit 1; }
+          fi
+          echo "version=$FILE" >> "$GITHUB_OUTPUT"
+        id: version
+
+      - name: Run the test suite
+        # Never ship a build whose tests were not run on the machine that built it.
+        run: python3 -m unittest discover -s tests -q
+
+      - name: Build the .app and .dmg
+        env:
+          # Absent on a fork or before signing is set up — build-app.sh falls
+          # back to ad-hoc signing, which still produces a runnable app.
+          APPLE_SIGN_ID: ${{ secrets.APPLE_SIGN_ID }}
+        run: ./packaging/build-app.sh
+
+      - name: Verify the built app actually starts
+        # A .dmg that builds but does not launch is the failure this catches:
+        # nothing else in CI opens the bundle.
+        run: |
+          open -a "$PWD/dist/OurCal.app" --args --window
+          for i in $(seq 1 20); do
+            if curl -sf --max-time 2 http://127.0.0.1:8756/api/events >/dev/null; then
+              echo "app is serving"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::built app did not serve within 20s"; exit 1
+        env:
+          OURCAL_DEMO: "1"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.version.outputs.version) }}
+          name: OurCal ${{ steps.version.outputs.version }}
+          files: dist/*.dmg
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            1. Download the `.dmg` below and open it.
+            2. Drag **OurCal** to Applications.
+            3. **First launch only:** right-click OurCal → **Open** → **Open**.
+
+            macOS says *"OurCal is damaged and can't be opened"* or *"cannot be
+            opened because the developer cannot be verified"*. Neither is true —
+            the app is unsigned, and macOS words that badly. The right-click →
+            Open step is the standard way past it. If you prefer the terminal:
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/OurCal.app
+            ```
+
+            ## Before it can show anything
+
+            OurCal talks to your own Google account, so you supply your own
+            OAuth credentials — see **SETUP_GUIDE.md**. Put `credentials.json`
+            and `accounts.json` in:
+
+            ```
+            ~/Library/Application Support/OurCal/
+            ```
+
+            Apple Silicon only.

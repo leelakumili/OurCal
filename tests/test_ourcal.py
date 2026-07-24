@@ -1648,39 +1648,28 @@ class TestDataDir(unittest.TestCase):
         self.assertEqual(ourcal.token_path("Leela K"),
                          os.path.join(ourcal.APP_DIR, "token_leela-k.json"))
 
-    def test_migration_is_a_no_op_for_a_source_checkout(self):
-        # The checkout IS the data dir; copying onto itself would be pointless
-        # and could clobber live tokens.
+    def test_source_checkout_creates_no_application_support_dir(self):
         self._bundled(False)
-        self.assertEqual(ourcal.migrate_user_files(), [])
+        self.assertEqual(ourcal.ensure_data_dir(), ourcal.APP_DIR)
 
-    def test_migration_copies_without_overwriting(self):
+    def test_bundled_install_gets_a_data_dir(self):
         import shutil
         import tempfile
-        src = tempfile.mkdtemp()
-        dst = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, src, True)
-        self.addCleanup(shutil.rmtree, dst, True)
-        with open(os.path.join(src, "credentials.json"), "w") as f:
-            f.write("fresh")
-        with open(os.path.join(src, "token_leela.json"), "w") as f:
-            f.write("fresh")
-        with open(os.path.join(dst, "token_leela.json"), "w") as f:
-            f.write("ALREADY THERE")      # an existing sign-in must survive
-
+        tmp = tempfile.mkdtemp()
+        shutil.rmtree(tmp)                     # ensure_data_dir must create it
+        self.addCleanup(shutil.rmtree, tmp, True)
         self._bundled(True)
-        real_app, real_sup = ourcal.APP_DIR, ourcal.SUPPORT_DIR
-        ourcal.APP_DIR, ourcal.SUPPORT_DIR = src, dst
-        self.addCleanup(lambda: setattr(ourcal, "APP_DIR", real_app))
-        self.addCleanup(lambda: setattr(ourcal, "SUPPORT_DIR", real_sup))
+        real = ourcal.SUPPORT_DIR
+        ourcal.SUPPORT_DIR = tmp
+        self.addCleanup(lambda: setattr(ourcal, "SUPPORT_DIR", real))
+        self.assertEqual(ourcal.ensure_data_dir(), tmp)
+        self.assertTrue(os.path.isdir(tmp))
 
-        moved = ourcal.migrate_user_files()
-        self.assertIn("credentials.json", moved)
-        self.assertNotIn("token_leela.json", moved)          # not overwritten
-        with open(os.path.join(dst, "token_leela.json")) as f:
-            self.assertEqual(f.read(), "ALREADY THERE")
-        with open(os.path.join(src, "credentials.json")) as f:
-            self.assertEqual(f.read(), "fresh")              # copied, not moved
+    def test_no_silent_migration_from_the_bundle(self):
+        # APP_DIR inside a packaged app points at the bundle, never at a
+        # checkout, so copying from it would find nothing while looking like
+        # it worked. Importing sign-ins is a documented manual copy.
+        self.assertFalse(hasattr(ourcal, "migrate_user_files"))
 
 
 class TestStartServer(unittest.TestCase):

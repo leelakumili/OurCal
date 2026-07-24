@@ -20,6 +20,37 @@ Open <http://127.0.0.1:8756> — realistic demo events, fully clickable, includi
 the create, sync, and delete flows. Nothing touches Google, so it's the safe
 place to try deleting something.
 
+## Install as a Mac app
+
+Grab the `.dmg` from [Releases](../../releases), drag **OurCal** to
+Applications, then **right-click it → Open → Open** the first time.
+
+That step matters: macOS will otherwise refuse with *"OurCal is damaged and
+can't be opened"*. It isn't damaged — the app is unsigned, and that is simply
+how macOS words an unsigned download. Right-click → Open is the supported way
+past it, once per install. The terminal equivalent:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/OurCal.app
+```
+
+The app runs its own server internally and shows the dashboard in a real
+window — no terminal, no browser tab. Your credentials and sign-ins live in
+`~/Library/Application Support/OurCal/`, outside the app, so upgrading never
+signs you out.
+
+**The `.dmg` removes the Python setup, not the Google setup.** OurCal reads
+your calendars with your own OAuth credentials, so you still do the one-time
+Google Cloud steps in [SETUP_GUIDE.md](SETUP_GUIDE.md) and drop
+`credentials.json` and `accounts.json` into that folder. Shipping a shared
+client secret inside a public app would get it revoked and route everyone's
+calendar traffic through one quota.
+
+Already ran it from a checkout? Copy your `token_*.json` files into that folder
+to keep the sign-ins you already did.
+
+Apple Silicon only. Build it yourself with `./packaging/build-app.sh`.
+
 ## Real use
 
 1. **List your accounts** in `accounts.json` next to `ourcal.py` (see

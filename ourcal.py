@@ -38,27 +38,18 @@ def user_path(name):
     return os.path.join(data_dir(), name)
 
 
-def migrate_user_files():
-    """Move a source checkout's credentials and tokens into Application Support.
+def ensure_data_dir():
+    """Make sure a bundled install has somewhere to keep credentials and tokens.
 
-    Only ever runs for a bundled install, and never overwrites: the first launch
-    of the .app adopts the sign-ins you already had, and nothing is lost if you
-    keep using the checkout too. Copies rather than moves for the same reason.
+    Deliberately does NOT try to import an existing checkout's files. Inside a
+    packaged app `__file__` resolves into the bundle, so APP_DIR points at the
+    app itself and never at wherever you cloned the repo — any "migration" from
+    there would silently find nothing while looking like it worked. Moving a
+    checkout's sign-ins across is a documented copy, not a guess the app makes.
     """
-    if not is_bundled():
-        return []
-    import glob
-    import shutil
-    os.makedirs(SUPPORT_DIR, exist_ok=True)
-    moved = []
-    names = list(USER_FILES) + [os.path.basename(p) for p in
-                                glob.glob(os.path.join(APP_DIR, "token_*.json"))]
-    for name in names:
-        src, dst = os.path.join(APP_DIR, name), os.path.join(SUPPORT_DIR, name)
-        if os.path.exists(src) and not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            moved.append(name)
-    return moved
+    if is_bundled():
+        os.makedirs(SUPPORT_DIR, exist_ok=True)
+    return data_dir()
 
 
 def slug(label):
@@ -116,16 +107,17 @@ def load_accounts(path):
         return None
 
 
-# Migration has to happen before the accounts file is read, not in main():
-# ACCOUNTS is resolved at import, so a bundled first launch would otherwise
-# look in an empty Application Support and fall back to placeholders.
-migrate_user_files()
+# Before the accounts file is read, not in main(): ACCOUNTS resolves at import.
+ensure_data_dir()
 ACCOUNTS = load_accounts(user_path("accounts.json")) or ACCOUNTS
 
 TIMEZONE = "America/Los_Angeles"
 DAYS_AHEAD = 30
 POLL_MINUTES = 5
 PORT = 8756
+# Single source of truth for the version: the release workflow reads it from
+# here, so a tag can never disagree with what the app reports.
+VERSION = "1.0.0"
 
 # Colorblind-safe categorical palette (parallel light/dark arrays).
 PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
