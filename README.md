@@ -56,6 +56,13 @@ place to try deleting something.
   **Sync…**. Title and time are prefilled and editable; the original is never
   modified. Each copy lands as either **full details** or a **busy block** that
   holds the time while hiding the title, location, and notes.
+- **Edit an event at its source** — hover any row and pick **Edit…**. Change the
+  title, date, time, location, or notes and the change is written back to the
+  real Google events behind the row. A row that lives on four calendars lists
+  all four with checkboxes, so one reschedule moves every copy; untick one to
+  leave it where it is. Recurring events offer this-occurrence or whole-series,
+  and guests are never emailed. Events you were invited to but do not organize
+  show Edit disabled — Google only lets the organizer change those.
 - **Forward an invite outside** — enter any address in the sync form and choose
   which of your accounts sends it. That copy always carries full details so the
   invite is readable, while your own mirrors stay as private as you chose.
