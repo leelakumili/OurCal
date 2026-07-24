@@ -1,4 +1,5 @@
-import copy, json, os, unittest
+import copy, datetime, json, os, unittest
+from zoneinfo import ZoneInfo
 os.environ.setdefault("OURCAL_DEMO", "1")  # keep imports side-effect free / no google
 import ourcal
 
@@ -1615,6 +1616,61 @@ class TestBootstrapGuard(unittest.TestCase):
         finally:
             os.environ["OURCAL_DEMO"] = "1"  # restore for other tests
             os.environ.pop("OURCAL_REEXEC", None)
+
+
+class TestClampDays(unittest.TestCase):
+    """The agenda window comes from a URL, so it is untrusted input."""
+
+    def test_default_when_absent(self):
+        self.assertEqual(ourcal.clamp_days(None), ourcal.DAYS_AHEAD)
+
+    def test_default_when_not_a_number(self):
+        # A bad value should still show you your calendar, not a stack trace.
+        self.assertEqual(ourcal.clamp_days("banana"), ourcal.DAYS_AHEAD)
+        self.assertEqual(ourcal.clamp_days(""), ourcal.DAYS_AHEAD)
+
+    def test_accepts_a_string_because_query_params_are_strings(self):
+        self.assertEqual(ourcal.clamp_days("90"), 90)
+
+    def test_clamps_to_the_ceiling(self):
+        # Each extra day is more Google calls; a mistyped URL must not cost a
+        # minute of API time.
+        self.assertEqual(ourcal.clamp_days(99999), ourcal.MAX_DAYS_AHEAD)
+
+    def test_never_returns_a_useless_window(self):
+        self.assertEqual(ourcal.clamp_days(0), 1)
+        self.assertEqual(ourcal.clamp_days(-5), 1)
+
+
+class TestEventsWindow(unittest.TestCase):
+    def setUp(self):
+        os.environ["OURCAL_DEMO"] = "1"
+        ourcal.reset_demo()
+
+    def test_envelope_reports_the_window_it_used(self):
+        self.assertEqual(ourcal.get_events()["days"], ourcal.DAYS_AHEAD)
+        self.assertEqual(ourcal.get_events(days="180")["days"], 180)
+
+    def test_bad_window_falls_back_rather_than_failing(self):
+        self.assertEqual(ourcal.get_events(days="nonsense")["days"],
+                         ourcal.DAYS_AHEAD)
+
+    def test_google_collect_honours_the_window(self):
+        # The window is the only thing bounding how much Google is asked for,
+        # so it must reach timeMax rather than being silently dropped.
+        seen = {}
+        real = ourcal.list_account_events
+
+        def fake(label, email, time_min, time_max):
+            seen["max"] = time_max
+            return [], None
+
+        ourcal.list_account_events = fake
+        self.addCleanup(lambda: setattr(ourcal, "list_account_events", real))
+        pin_accounts(self)
+        now = datetime.datetime(2026, 7, 1, tzinfo=ZoneInfo(ourcal.TIMEZONE))
+        ourcal._google_collect(now, 90)
+        self.assertTrue(seen["max"].startswith("2026-09-29"))
 
 
 class TestDataDir(unittest.TestCase):

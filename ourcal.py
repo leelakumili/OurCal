@@ -113,6 +113,9 @@ ACCOUNTS = load_accounts(user_path("accounts.json")) or ACCOUNTS
 
 TIMEZONE = "America/Los_Angeles"
 DAYS_AHEAD = 30
+# A wider window costs proportionally more Google calls, so the ceiling exists
+# to stop a mistyped URL spending a minute of API time.
+MAX_DAYS_AHEAD = 730
 POLL_MINUTES = 5
 PORT = 8756
 # Single source of truth for the version: the release workflow reads it from
@@ -452,8 +455,20 @@ def _accounts_meta(accounts):
             for i, a in enumerate(accounts)]
 
 
-def get_events(now=None):
+def clamp_days(days):
+    """How far ahead to look, from untrusted input. Falls back to the default
+    rather than erroring: a bad value should show you your calendar, not a
+    stack trace."""
+    try:
+        d = int(days)
+    except (TypeError, ValueError):
+        return DAYS_AHEAD
+    return max(1, min(d, MAX_DAYS_AHEAD))
+
+
+def get_events(now=None, days=None):
     now = now or datetime.now(ZoneInfo(TIMEZONE))
+    days = clamp_days(days)
     errors = []
     if is_demo():
         if _DEMO_STORE is None:
@@ -462,10 +477,11 @@ def get_events(now=None):
         events = merge_events(_DEMO_STORE)
     else:
         accounts = ACCOUNTS
-        events, errors = _google_collect(now)   # defined in GOOGLE section
+        events, errors = _google_collect(now, days)  # defined in GOOGLE section
     return {
         "updated": _iso(now),
         "timezone": TIMEZONE,
+        "days": days,
         "accounts": _accounts_meta(accounts),
         "events": events,
         "errors": errors,
@@ -692,9 +708,9 @@ def list_account_events(label, email, time_min, time_max):
         return [], f"{type(e).__name__} — re-auth or check access"
 
 
-def _google_collect(now):
+def _google_collect(now, days=None):
     time_min = _iso(now)
-    time_max = _iso(now + timedelta(days=DAYS_AHEAD))
+    time_max = _iso(now + timedelta(days=clamp_days(days)))
     all_events, errors = [], []
     for a in ACCOUNTS:
         evs, err = list_account_events(a["label"], a["email"], time_min, time_max)
@@ -921,6 +937,8 @@ PAGE = r"""<!doctype html>
   .scoperow{display:flex;align-items:center;gap:7px;padding:5px 0;font-size:13px}
   .scoperow .sub{color:var(--muted);font-size:11px}
   @media (max-width:560px){ .rowacts{opacity:1} }
+  #rangeSel{font-size:13px;padding:6px 8px;border-radius:9px;border:1px solid var(--border);
+    background:var(--card);color:var(--text);cursor:pointer}
   .toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:60}
   .toast{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--live);border-radius:10px;padding:10px 14px;box-shadow:var(--shadow);font-size:13px;max-width:320px}
   .toast.err{border-left-color:var(--danger)}
@@ -933,6 +951,12 @@ PAGE = r"""<!doctype html>
     <h1>OurCal</h1>
     <span class="stamp" id="stamp"></span>
     <span class="grow"></span>
+    <select id="rangeSel" title="How far ahead to show">
+      <option value="30">Next 30 days</option>
+      <option value="90">Next 3 months</option>
+      <option value="180">Next 6 months</option>
+      <option value="365">Next year</option>
+    </select>
     <button class="icon-btn" id="themeBtn" title="Toggle light / dark">🌓</button>
     <button id="refreshBtn" title="Refresh now">↻ Refresh</button>
     <button class="btn-primary" id="newBtn">+ New event / Block time</button>
@@ -1177,14 +1201,26 @@ function evRow(ev,idx){
   return `<div class="ev ${live?"live":""}"><span class="bar" style="background:${c}"></span><div class="when">${when}</div><div class="body"><div class="title">${esc(ev.title)}${livetag}</div><div class="meta">${badges}${free}${loc}${guests}${join}</div></div>${acts}</div>`;
 }
 
+function rangeDays(){ return localStorage.getItem("ourcal-days") || "30"; }
 function load(){
-  fetch("/api/events").then(r=>r.json()).then(d=>{ DATA=d; render(); })
+  fetch("/api/events?days="+encodeURIComponent(rangeDays())).then(r=>r.json()).then(d=>{ DATA=d; render(); })
     .catch(()=>{ document.getElementById("banner").innerHTML='<div class="banner">⚠️ Could not reach the OurCal server.</div>'; });
 }
 
 /* theme */
 function applyTheme(t){ t?document.documentElement.setAttribute("data-theme",t):document.documentElement.removeAttribute("data-theme"); }
 (function(){ const s=localStorage.getItem("ourcal-theme"); if(s) applyTheme(s); })();
+(function(){
+  const sel=document.getElementById("rangeSel");
+  sel.value=rangeDays();
+  sel.onchange=()=>{
+    localStorage.setItem("ourcal-days", sel.value);
+    // A wider window means more Google calls, so say something rather than
+    // leaving the agenda looking frozen.
+    toast("Loading "+sel.options[sel.selectedIndex].text.toLowerCase()+"…");
+    load();
+  };
+})();
 document.getElementById("themeBtn").onclick=()=>{
   const cur=document.documentElement.getAttribute("data-theme");
   const next=cur==="dark"?"light":(cur==="light"?"dark":(isDark()?"light":"dark"));
@@ -1515,8 +1551,11 @@ class OurCalHandler(BaseHTTPRequestHandler):
             if self.path == "/" or self.path.startswith("/?"):
                 html = PAGE.replace("__POLL_MS__", str(POLL_MINUTES * 60000))
                 self._send(200, html, "text/html; charset=utf-8")
-            elif self.path == "/api/events":
-                self._send(200, json.dumps(get_events()))
+            elif self.path.split("?")[0] == "/api/events":
+                from urllib.parse import parse_qs, urlparse
+                q = parse_qs(urlparse(self.path).query)
+                self._send(200, json.dumps(
+                    get_events(days=(q.get("days") or [None])[0])))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception as e:

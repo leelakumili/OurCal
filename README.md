@@ -94,13 +94,16 @@ source.
 
 ## Features
 
-- **Unified agenda** for the next 30 days across every selected calendar of every
+- **Unified agenda** across every selected calendar of every
   configured account (including calendars synced into them, e.g. ADPList),
   auto-refreshing every 5 minutes with a **Refresh** button for an instant poll.
 - **One row per appointment.** The same appointment sitting on four accounts is
   four Google events with four different IDs — OurCal collapses them into a
   single row wearing every calendar's badge, with a striped accent bar, instead
   of repeating it once per account. Deleting still reaches all four copies.
+- **Choose how far ahead you look** — 30 days by default, up to a year from the
+  header. Events further out than the current window simply are not fetched, so
+  a wider range costs proportionally more Google calls.
 - **Stat tiles** (meetings today / next 7 days / hours in meetings / countdown),
   **per-account filter chips**, live-meeting highlighting, Join links, and a
   light/dark theme (follows your system, with a manual toggle).
@@ -164,7 +167,7 @@ VERSION = "1.0.0"
 python3 -m unittest discover tests -v
 ```
 
-209 tests, no Google credentials or network needed — the suite runs in demo mode
+217 tests, no Google credentials or network needed — the suite runs in demo mode
 against in-memory fixtures.
 
 | Task | Command |
