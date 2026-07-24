@@ -1404,6 +1404,26 @@ class TestPageStructure(unittest.TestCase):
         for wired in ["guard(submit)", "guard(submitDelete)", "guard(openModal)"]:
             self.assertIn(wired, ourcal.PAGE, f"unguarded handler: {wired}")
 
+    def test_page_has_edit_dialog_markers(self):
+        for marker in ["/api/update", "id=\"editModal\"", "id=\"editRows\"",
+                       "id=\"e-title\"", "id=\"e-date\"", "id=\"e-start\"",
+                       "id=\"e-end\"", "id=\"e-allday\"", "id=\"e-loc\"",
+                       "id=\"e-notes\"", "id=\"wrap-escope\"",
+                       "openEdit", "submitEdit"]:
+            self.assertIn(marker, ourcal.PAGE, f"missing {marker!r}")
+
+    def test_edit_dialog_offers_occurrence_and_series(self):
+        self.assertIn('value="eoccurrence"', ourcal.PAGE)
+        self.assertIn('value="eseries"', ourcal.PAGE)
+
+    def test_edit_rows_are_scoped_like_the_other_pickers(self):
+        # Same bug class as the delete dialog: an unscoped .acct selector picks
+        # up rows from other modals and breaks unrelated buttons.
+        self.assertIn('querySelectorAll("#editRows .acct")', ourcal.PAGE)
+
+    def test_edit_button_is_disabled_when_nothing_is_editable(self):
+        self.assertIn("canEdit", ourcal.PAGE)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -901,6 +901,32 @@ PAGE = r"""<!doctype html>
     </div>
   </div>
 </div>
+
+<div class="modal" id="editModal">
+  <div class="sheet">
+    <h2>Edit event</h2>
+    <div class="field"><label>Title</label><input type="text" id="e-title" placeholder="Busy"></div>
+    <div class="row2">
+      <div class="field"><label>Date</label><input type="date" id="e-date"></div>
+      <div class="field" id="wrap-estart"><label>Start</label><input type="time" id="e-start"></div>
+      <div class="field" id="wrap-eend"><label>End</label><input type="time" id="e-end"></div>
+    </div>
+    <div class="field"><label style="display:inline-flex;gap:6px;align-items:center;color:var(--text)"><input type="checkbox" id="e-allday"> All-day</label></div>
+    <div class="field"><label>Location</label><input type="text" id="e-loc"></div>
+    <div class="field"><label>Notes</label><textarea id="e-notes" rows="2"></textarea></div>
+    <div class="field"><label>Apply to</label><div id="editRows"></div></div>
+    <div class="field" id="wrap-escope" style="display:none">
+      <label>Scope</label>
+      <div class="scoperow"><input type="radio" name="escope" id="escope-occ" value="eoccurrence" checked><label for="escope-occ" style="color:var(--text)">This occurrence only</label></div>
+      <div class="scoperow"><input type="radio" name="escope" id="escope-ser" value="eseries"><label for="escope-ser" style="color:var(--text)">The entire series <span class="sub">— changing the date shifts every occurrence</span></label></div>
+    </div>
+    <div class="hint">Guests are never emailed about edits made here.</div>
+    <div class="actions">
+      <button id="editCancelBtn">Cancel</button>
+      <button class="btn-primary" id="editSaveBtn">Save changes</button>
+    </div>
+  </div>
+</div>
 <div class="toasts" id="toasts"></div>
 
 <script>
@@ -912,6 +938,7 @@ const hidden = new Set();
 let mode = "copies";
 let ROWS = [];        // events as currently rendered, indexed by row buttons
 let DEL_EV = null;    // event awaiting delete confirmation
+let EDIT_EV = null;   // event awaiting edit
 
 function isDark(){
   const t = document.documentElement.getAttribute("data-theme");
@@ -1018,7 +1045,11 @@ function render(){
   box.querySelectorAll(".mini").forEach(b=>b.onclick=()=>{
     const ev=ROWS[Number(b.dataset.idx)];
     if(!ev) return;
-    guard(()=>b.dataset.act==="sync"?openSync(ev):openDelete(ev))();
+    guard(()=>{
+      if(b.dataset.act==="sync") return openSync(ev);
+      if(b.dataset.act==="edit") return openEdit(ev);
+      return openDelete(ev);
+    })();
   });
 }
 /* One row can belong to several calendars. Segment the accent bar so that
@@ -1041,7 +1072,10 @@ function evRow(ev,idx){
   const join=safeJoin?`<a class="join" href="${encodeURI(safeJoin)}" target="_blank" rel="noopener">Join ↗</a>`:"";
   const livetag=live?'<span class="live-tag">● LIVE</span>':"";
   const canDelete=(ev.sources||[]).some(s=>s.eventId);
+  const canEdit=(ev.sources||[]).some(s=>s.eventId&&s.editable);
+  const editTip=canEdit?"":' title="Only the organizer can edit this event"';
   const acts=`<div class="rowacts"><button class="mini" data-act="sync" data-idx="${idx}">Sync…</button>`+
+    `<button class="mini" data-act="edit" data-idx="${idx}"${canEdit?"":" disabled"}${editTip}>Edit…</button>`+
     (canDelete?`<button class="mini danger" data-act="del" data-idx="${idx}">Delete…</button>`:"")+`</div>`;
   return `<div class="ev ${live?"live":""}"><span class="bar" style="background:${c}"></span><div class="when">${when}</div><div class="body"><div class="title">${esc(ev.title)}${livetag}</div><div class="meta">${badges}${free}${loc}${guests}${join}</div></div>${acts}</div>`;
 }
@@ -1195,6 +1229,64 @@ function submitDelete(){
     }).catch(e=>toast("Delete failed: "+e,true))
     .finally(()=>{ btn.disabled=false; });
 }
+/* ---- edit an event at its source ---- */
+function openEdit(ev){
+  EDIT_EV=ev;
+  document.getElementById("e-title").value=ev.title||"";
+  document.getElementById("e-date").value=dateVal(ev.start,ev.allDay);
+  document.getElementById("e-allday").checked=!!ev.allDay;
+  const h=ev.allDay?"none":"";
+  document.getElementById("wrap-estart").style.display=h;
+  document.getElementById("wrap-eend").style.display=h;
+  if(!ev.allDay){
+    document.getElementById("e-start").value=timeVal(ev.start);
+    document.getElementById("e-end").value=timeVal(ev.end);
+  }
+  document.getElementById("e-loc").value=ev.location||"";
+  document.getElementById("e-notes").value=ev.notes||"";
+  const srcs=(ev.sources||[]).filter(s=>s.eventId);
+  const box=document.getElementById("editRows"); box.innerHTML="";
+  srcs.forEach((s,i)=>{
+    const row=document.createElement("div"); row.className="acct";
+    const why=s.editable?"":'<div class="em">Only the organizer can edit this</div>';
+    row.innerHTML=`<input type="checkbox" class="editsrc" data-i="${i}"${s.editable?" checked":" disabled"}>`+
+      `<span class="dot" style="background:${colorForLabel(s.label)}"></span>`+
+      `<span class="who"><div class="nm">${esc(s.label)}</div>`+
+      `<div class="em">${esc(s.calendarName||"")}</div>${why}</span>`;
+    box.appendChild(row);
+  });
+  const recurring=srcs.some(s=>s.seriesId);
+  document.getElementById("wrap-escope").style.display=recurring?"":"none";
+  document.getElementById("escope-occ").checked=true;
+  document.getElementById("editModal").classList.add("open");
+}
+function closeEdit(){ document.getElementById("editModal").classList.remove("open"); EDIT_EV=null; }
+function submitEdit(){
+  if(!EDIT_EV) return;
+  const srcs=(EDIT_EV.sources||[]).filter(s=>s.eventId);
+  const chosen=[...document.querySelectorAll("#editRows .acct")]
+    .map(row=>row.querySelector(".editsrc"))
+    .filter(c=>c&&c.checked).map(c=>srcs[Number(c.dataset.i)]);
+  if(!chosen.length){ toast("Pick at least one calendar",true); return; }
+  const ser=document.getElementById("escope-ser");
+  const payload={
+    title:val("e-title"), date:val("e-date"), startTime:val("e-start"),
+    endTime:val("e-end"), allDay:document.getElementById("e-allday").checked,
+    location:val("e-loc"), notes:val("e-notes"),
+    scope:(ser&&ser.checked)?"series":"occurrence", sources:chosen};
+  const btn=document.getElementById("editSaveBtn"); btn.disabled=true;
+  fetch("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+    .then(r=>r.json()).then(res=>{
+      if(res.error){ toast(res.error,true); return; }
+      const ok=(res.results||[]).filter(x=>x.ok).map(x=>x.label);
+      const bad=(res.results||[]).filter(x=>!x.ok);
+      if(res.ok) toast("Updated "+ok.join(", "));
+      else toast("Updated "+(ok.join(", ")||"none")+" · failed: "+
+                 bad.map(x=>x.label+" ("+x.error+")").join(", "),true);
+      closeEdit(); load();
+    }).catch(e=>toast("Update failed: "+e,true))
+    .finally(()=>{ btn.disabled=false; });
+}
 function toast(msg,err){
   const t=document.createElement("div"); t.className="toast"+(err?" err":""); t.textContent=msg;
   document.getElementById("toasts").appendChild(t);
@@ -1261,7 +1353,11 @@ document.querySelectorAll("#seg-detail button").forEach(b=>b.onclick=()=>setDeta
 document.getElementById("delCancelBtn").onclick=closeDelete;
 document.getElementById("delConfirmBtn").onclick=guard(submitDelete);
 document.getElementById("delModal").onclick=e=>{ if(e.target.id==="delModal") closeDelete(); };
-document.addEventListener("keydown",e=>{ if(e.key==="Escape"){ closeModal(); closeDelete(); } });
+document.getElementById("editCancelBtn").onclick=closeEdit;
+document.getElementById("editSaveBtn").onclick=guard(submitEdit);
+document.getElementById("editModal").onclick=e=>{ if(e.target.id==="editModal") closeEdit(); };
+document.getElementById("e-allday").onchange=e=>{ const h=e.target.checked?"none":""; document.getElementById("wrap-estart").style.display=h; document.getElementById("wrap-eend").style.display=h; };
+document.addEventListener("keydown",e=>{ if(e.key==="Escape"){ closeModal(); closeDelete(); closeEdit(); } });
 
 /* optional deep links: ?theme=dark|light  and  ?new=1 (open create form) */
 const params=new URLSearchParams(location.search);
