@@ -1303,7 +1303,8 @@ class OurCalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            routes = {"/api/create": create_event, "/api/delete": delete_events}
+            routes = {"/api/create": create_event, "/api/delete": delete_events,
+                      "/api/update": update_events}
             handler = routes.get(self.path)
             if handler is None:
                 self._send(404, json.dumps({"error": "not found"}))

@@ -1299,6 +1299,61 @@ class TestDeleteEndpoint(unittest.TestCase):
         self.assertEqual(cm.exception.code, 404)
 
 
+class TestUpdateEndpoint(unittest.TestCase):
+    """End-to-end over HTTP in demo mode: an edited event comes back changed."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["OURCAL_DEMO"] = "1"
+        cls.server = ourcal.make_server(0)
+        cls.port = cls.server.server_address[1]
+        cls.t = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.t.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        ourcal.reset_demo()
+
+    def _post(self, path, obj):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(obj).encode(), method="POST",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read().decode())
+
+    def _events(self):
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/api/events") as r:
+            return json.loads(r.read().decode())["events"]
+
+    def test_edit_round_trips_through_the_api(self):
+        standup = [e for e in self._events() if e["title"] == "Team Standup"][0]
+        status, res = self._post("/api/update", {
+            "title": "Standup (moved)", "date": "2026-09-09",
+            "startTime": "15:00", "endTime": "15:30", "allDay": False,
+            "location": "Room 2", "notes": "", "scope": "occurrence",
+            "sources": standup["sources"]})
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        after = [e for e in self._events() if e["title"] == "Standup (moved)"]
+        self.assertEqual(len(after), 1)
+        self.assertTrue(after[0]["start"].startswith("2026-09-09T15:00"))
+        self.assertEqual(after[0]["location"], "Room 2")
+
+    def test_bad_payload_returns_ok_false_with_a_reason(self):
+        standup = [e for e in self._events() if e["title"] == "Team Standup"][0]
+        _, res = self._post("/api/update", {
+            "title": "x", "date": "2026-09-09", "startTime": "15:00",
+            "endTime": "14:00", "allDay": False, "location": "", "notes": "",
+            "scope": "occurrence", "sources": standup["sources"]})
+        self.assertFalse(res["ok"])
+        self.assertIn("end", res["error"].lower())
+
+
 class TestBootstrapGuard(unittest.TestCase):
     def test_demo_skips_bootstrap(self):
         os.environ["OURCAL_DEMO"] = "1"
