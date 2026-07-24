@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
@@ -1539,18 +1540,74 @@ def make_server(port):
     return ThreadingHTTPServer(("127.0.0.1", port), OurCalHandler)
 
 
-def run_server():
+def start_server():
+    """Bind and start serving in the background; return (server, url).
+
+    Falls back to an ephemeral port when the preferred one is taken. A script
+    run can print advice and let you fix it, but a double-clicked .app has no
+    terminal to print to — refusing to start there just looks like an icon that
+    does nothing. Any port beats no window.
+    """
+    import threading
     try:
         server = make_server(PORT)
-    except OSError as e:
-        print(f"OurCal: cannot bind 127.0.0.1:{PORT} ({e}). "
-              f"Something may already use it — change PORT at the top of "
-              f"ourcal.py or free the port (lsof -ti tcp:{PORT}).")
-        raise SystemExit(1)
-    url = f"http://127.0.0.1:{PORT}"
+    except OSError:
+        server = make_server(0)     # 0 → the OS picks a free port
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{port}"
+
+
+def run_app_window():
+    """Serve in-process and show the dashboard in a native window.
+
+    PyObjC is imported here, not at module scope, so the stdlib-only script
+    path keeps working on a machine that has never heard of it — the packaged
+    .app is the only thing that needs a window. Raises ImportError when PyObjC
+    is absent so the caller can fall back to the browser.
+    """
+    import AppKit
+    import WebKit
+    from Foundation import NSURL, NSURLRequest
+
+    server, url = start_server()
+    app = AppKit.NSApplication.sharedApplication()
+    # Regular, not Accessory: this app wants a Dock icon and a menu bar.
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
+
+    frame = AppKit.NSMakeRect(0, 0, 1100, 820)
+    style = (AppKit.NSWindowStyleMaskTitled
+             | AppKit.NSWindowStyleMaskClosable
+             | AppKit.NSWindowStyleMaskMiniaturizable
+             | AppKit.NSWindowStyleMaskResizable)
+    win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        frame, style, AppKit.NSBackingStoreBuffered, False)
+    win.setTitle_("OurCal")
+    win.setMinSize_(AppKit.NSMakeSize(560, 480))
+    win.center()
+
+    view = WebKit.WKWebView.alloc().initWithFrame_(frame)
+    view.setAutoresizingMask_(AppKit.NSViewWidthSizable
+                              | AppKit.NSViewHeightSizable)
+    view.loadRequest_(NSURLRequest.requestWithURL_(NSURL.URLWithString_(url)))
+    win.setContentView_(view)
+    win.makeKeyAndOrderFront_(None)
+
+    app.activateIgnoringOtherApps_(True)
+    try:
+        app.run()
+    finally:
+        server.shutdown()
+
+
+def run_server():
+    server, url = start_server()
+    if not url.endswith(str(PORT)):
+        print(f"OurCal: port {PORT} was busy, using {url} instead.")
     print(f"OurCal running at {url}  (Ctrl-C to stop)")
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         server.shutdown()
 
@@ -1615,9 +1672,29 @@ def ensure_deps():
     os.execve(py, [py, os.path.abspath(__file__)], env)
 
 
+def want_window():
+    """Whether to open a native window rather than serve to a browser.
+
+    The packaged .app always wants one — it has no terminal to print a URL to.
+    From a checkout you opt in with --window, so the familiar `python3
+    ourcal.py` keeps behaving exactly as it always has.
+    """
+    import sys
+    return is_bundled() or "--window" in sys.argv
+
+
 def main():
     if not is_demo():
         ensure_deps()
+    if want_window():
+        try:
+            run_app_window()
+            return
+        except ImportError:
+            # PyObjC missing — a browser tab is a far better outcome than a
+            # traceback, and from a checkout it's the expected one.
+            print("OurCal: no native window support (PyObjC not installed), "
+                  "falling back to the browser.")
     run_server()
 
 

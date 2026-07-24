@@ -1683,6 +1683,72 @@ class TestDataDir(unittest.TestCase):
             self.assertEqual(f.read(), "fresh")              # copied, not moved
 
 
+class TestStartServer(unittest.TestCase):
+    """A double-clicked .app has no terminal, so refusing to start on a busy
+    port would look like an icon that does nothing."""
+
+    def test_falls_back_to_a_free_port_when_the_preferred_one_is_taken(self):
+        blocker = ourcal.make_server(0)
+        taken = blocker.server_address[1]
+        self.addCleanup(blocker.server_close)
+        real = ourcal.PORT
+        ourcal.PORT = taken
+        self.addCleanup(lambda: setattr(ourcal, "PORT", real))
+
+        server, url = ourcal.start_server()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.assertNotIn(f":{taken}", url)
+        self.assertTrue(url.startswith("http://127.0.0.1:"))
+
+    def test_uses_the_preferred_port_when_it_is_free(self):
+        probe = ourcal.make_server(0)
+        free = probe.server_address[1]
+        probe.server_close()                 # release it, then claim it
+        real = ourcal.PORT
+        ourcal.PORT = free
+        self.addCleanup(lambda: setattr(ourcal, "PORT", real))
+
+        server, url = ourcal.start_server()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.assertTrue(url.endswith(f":{free}"))
+
+    def test_the_server_actually_answers(self):
+        server, url = ourcal.start_server()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        with urllib.request.urlopen(url + "/api/events", timeout=5) as r:
+            self.assertEqual(r.status, 200)
+
+
+class TestWantWindow(unittest.TestCase):
+    def _bundled(self, yes):
+        real = ourcal.is_bundled
+        ourcal.is_bundled = lambda: yes
+        self.addCleanup(lambda: setattr(ourcal, "is_bundled", real))
+
+    def test_bundled_app_always_wants_a_window(self):
+        self._bundled(True)
+        self.assertTrue(ourcal.want_window())
+
+    def test_plain_script_run_keeps_using_the_browser(self):
+        import sys
+        self._bundled(False)
+        real = sys.argv
+        sys.argv = ["ourcal.py"]
+        self.addCleanup(lambda: setattr(sys, "argv", real))
+        self.assertFalse(ourcal.want_window())
+
+    def test_window_flag_opts_a_checkout_in(self):
+        import sys
+        self._bundled(False)
+        real = sys.argv
+        sys.argv = ["ourcal.py", "--window"]
+        self.addCleanup(lambda: setattr(sys, "argv", real))
+        self.assertTrue(ourcal.want_window())
+
+
 class TestVenvBasePython(unittest.TestCase):
     """macOS ships 3.9, which Google's libraries warn about on every launch."""
 
