@@ -1618,6 +1618,34 @@ class TestBootstrapGuard(unittest.TestCase):
             os.environ.pop("OURCAL_REEXEC", None)
 
 
+class TestPlatform(unittest.TestCase):
+    """The same source runs on macOS and Android; the platform seams must
+    behave correctly on the side we can test — the desktop side."""
+
+    def test_not_android_off_android(self):
+        # Chaquopy is unimportable here, so this must be False.
+        self.assertFalse(ourcal.is_android())
+
+    def test_data_dir_ignores_android_branch_off_android(self):
+        real = ourcal.is_bundled
+        ourcal.is_bundled = lambda: False
+        self.addCleanup(lambda: setattr(ourcal, "is_bundled", real))
+        self.assertEqual(ourcal.data_dir(), ourcal.APP_DIR)
+
+    def test_oauth_flow_is_plain_run_local_server_off_android(self):
+        # On desktop, run_oauth_flow must not touch webbrowser or defer the
+        # token exchange — it just runs the standard flow.
+        calls = {}
+
+        class FakeFlow:
+            def run_local_server(self, **kw):
+                calls["kw"] = kw
+                return "creds"
+
+        self.assertEqual(ourcal.run_oauth_flow(FakeFlow()), "creds")
+        self.assertEqual(calls["kw"], {"port": 0})  # no android extras
+
+
 class TestClampDays(unittest.TestCase):
     """The agenda window comes from a URL, so it is untrusted input."""
 

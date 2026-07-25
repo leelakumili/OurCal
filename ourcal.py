@@ -21,6 +21,33 @@ def is_bundled():
     return getattr(sys, "frozen", False)
 
 
+def is_android():
+    """True when running inside the Android app.
+
+    Chaquopy — the runtime Briefcase uses — is importable only there, which
+    makes it a more honest probe than sniffing sys.platform (Android reports
+    itself as Linux).
+    """
+    try:
+        import com.chaquo.python  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def android_data_dir():
+    """The app's own external files directory.
+
+    Chosen over internal storage because you have to be able to PUT
+    credentials.json there: this path shows up in any file manager under
+    Android/data/<package>/files, needs no permissions, and is removed when the
+    app is uninstalled — which is the right lifetime for OAuth tokens.
+    """
+    from com.chaquo.python import Python
+    ctx = Python.getPlatform().getApplication()
+    return str(ctx.getExternalFilesDir(None).getAbsolutePath())
+
+
 def data_dir():
     """Where this install keeps credentials and tokens.
 
@@ -31,6 +58,8 @@ def data_dir():
     guide tells people to drop credentials.json, and it keeps a clone
     self-contained.
     """
+    if is_android():
+        return android_data_dir()
     return SUPPORT_DIR if is_bundled() else APP_DIR
 
 
@@ -47,9 +76,10 @@ def ensure_data_dir():
     there would silently find nothing while looking like it worked. Moving a
     checkout's sign-ins across is a documented copy, not a guess the app makes.
     """
-    if is_bundled():
-        os.makedirs(SUPPORT_DIR, exist_ok=True)
-    return data_dir()
+    d = data_dir()
+    if d != APP_DIR:
+        os.makedirs(d, exist_ok=True)
+    return d
 
 
 def slug(label):
@@ -632,6 +662,62 @@ def account_mismatch(label, expected, cals):
             f"{token_path(label)}, restart, and pick {expected}")
 
 
+def _android_open_url(url):
+    """Hand a URL to Android, which has no browser binary for webbrowser to find."""
+    from com.chaquo.python import Python
+    from java import jclass
+    Intent, Uri = jclass("android.content.Intent"), jclass("android.net.Uri")
+    ctx = Python.getPlatform().getApplication()
+    intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)  # required off an activity
+    ctx.startActivity(intent)
+
+
+def _await_network(timeout=90):
+    """Block until this process can resolve names again, or give up.
+
+    Android revokes a backgrounded process's network binding, and the browser
+    trip backgrounds us — so the redirect arrives at the exact moment DNS is
+    dead. google_auth_oauthlib would exchange the code immediately and fail
+    with EAI_NONAME. Waiting for the user to return to the app is what makes
+    the exchange succeed.
+    """
+    import socket
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            socket.getaddrinfo("oauth2.googleapis.com", 443)
+            return True
+        except OSError:
+            time.sleep(1)
+    return False
+
+
+def run_oauth_flow(flow):
+    """Complete an installed-app OAuth flow on whichever platform we are on.
+
+    Desktop needs nothing special. Android needs both fixes the spike found:
+    an Intent to open the browser, and a pause before the token exchange until
+    the app is foregrounded and has network again.
+    """
+    if not is_android():
+        return flow.run_local_server(port=0)
+
+    import webbrowser
+    real_fetch = flow.fetch_token
+
+    def fetch_when_online(**kw):
+        _await_network()
+        return real_fetch(**kw)
+
+    flow.fetch_token = fetch_when_online
+    webbrowser.get = lambda *a, **k: type(
+        "_I", (), {"open": staticmethod(
+            lambda u, new=0, autoraise=True: (_android_open_url(u), True)[1])})()
+    return flow.run_local_server(port=0, open_browser=True,
+                                 timeout_seconds=300)
+
+
 def creds_for(label, email):
     """Load/refresh creds for an account; run InstalledAppFlow if absent."""
     from google.oauth2.credentials import Credentials
@@ -657,7 +743,7 @@ def creds_for(label, email):
               f"        Pick this exact account in the browser window.\n",
               flush=True)
         flow = InstalledAppFlow.from_client_secrets_file(cred_file, SCOPES)
-        creds = flow.run_local_server(port=0)
+        creds = run_oauth_flow(flow)
     with open(path, "w") as f:
         f.write(creds.to_json())
     return creds
