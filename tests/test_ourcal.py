@@ -1952,5 +1952,71 @@ class TestPageStructure(unittest.TestCase):
         self.assertIn("rebase", ourcal.PAGE.lower())
 
 
+class TestAndroidProbe(unittest.TestCase):
+    """The bug this replaces: is_android() imported a Java package, which
+    returned False on a real device. Every Android seam stayed dark and
+    data_dir() fell through to APP_DIR — Chaquopy's AssetFinder directory,
+    which is regenerated on every APK install. The whole suite missed it
+    because every existing platform test asserts the desktop side."""
+
+    def _fake_api_level(self):
+        import sys
+        sys.getandroidapilevel = lambda: 33
+        self.addCleanup(lambda: delattr(sys, "getandroidapilevel"))
+
+    def test_true_when_the_interpreter_reports_an_android_api_level(self):
+        self._fake_api_level()
+        self.assertTrue(ourcal.is_android())
+
+    def test_false_on_a_plain_desktop(self):
+        self.assertFalse(ourcal.is_android())
+
+    def test_false_when_the_java_bridge_raises_a_non_importerror(self):
+        # The old probe only caught ImportError. A bridge that is present but
+        # not ready raises other things, and an uncaught one would crash the
+        # app at import time instead of degrading.
+        import builtins
+        real = builtins.__import__
+
+        def boom(name, *a, **k):
+            if name.startswith("com.chaquo"):
+                raise RuntimeError("bridge not ready")
+            return real(name, *a, **k)
+
+        builtins.__import__ = boom
+        self.addCleanup(lambda: setattr(builtins, "__import__", real))
+        self.assertFalse(ourcal.is_android())
+
+
+class TestAndroidDataDir(unittest.TestCase):
+    """The Android branch, exercised on the desktop by faking the probe —
+    the coverage that never existed."""
+
+    def _android(self, path="/data/data/com.leelakumili.ourcal/files"):
+        real_a, real_d = ourcal.is_android, ourcal.android_data_dir
+        ourcal.is_android = lambda: True
+        ourcal.android_data_dir = lambda: path
+        self.addCleanup(lambda: setattr(ourcal, "is_android", real_a))
+        self.addCleanup(lambda: setattr(ourcal, "android_data_dir", real_d))
+
+    def test_android_beats_both_desktop_branches(self):
+        self._android()
+        real = ourcal.is_bundled
+        ourcal.is_bundled = lambda: True      # even bundled, Android wins
+        self.addCleanup(lambda: setattr(ourcal, "is_bundled", real))
+        self.assertEqual(ourcal.data_dir(),
+                         "/data/data/com.leelakumili.ourcal/files")
+
+    def test_token_path_follows_the_android_branch(self):
+        self._android("/android/files")
+        self.assertEqual(ourcal.token_path("Leela K"),
+                         "/android/files/token_leela-k.json")
+
+    def test_user_path_follows_the_android_branch(self):
+        self._android("/android/files")
+        self.assertEqual(ourcal.user_path("credentials.json"),
+                         "/android/files/credentials.json")
+
+
 if __name__ == "__main__":
     unittest.main()

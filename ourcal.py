@@ -24,28 +24,36 @@ def is_bundled():
 def is_android():
     """True when running inside the Android app.
 
-    Chaquopy — the runtime Briefcase uses — is importable only there, which
-    makes it a more honest probe than sniffing sys.platform (Android reports
-    itself as Linux).
+    Probes the interpreter, never the Java bridge. The previous version
+    imported `com.chaquo.python` and returned False on a real device: every
+    Android seam stayed dark and data_dir() fell through to APP_DIR. Any
+    CPython built for Android defines sys.getandroidapilevel, and reading an
+    attribute cannot fail the way importing a Java package can.
     """
+    import sys
+    if hasattr(sys, "getandroidapilevel"):
+        return True
     try:
         import com.chaquo.python  # noqa: F401
         return True
-    except ImportError:
+    except Exception:   # a present-but-unready bridge raises more than ImportError
         return False
 
 
 def android_data_dir():
-    """The app's own external files directory.
+    """The app's private internal files directory.
 
-    Chosen over internal storage because you have to be able to PUT
-    credentials.json there: this path shows up in any file manager under
-    Android/data/<package>/files, needs no permissions, and is removed when the
-    app is uninstalled — which is the right lifetime for OAuth tokens.
+    Internal, not external. This used to return getExternalFilesDir() so that
+    credentials.json could be dropped in with a file manager — but Android 11+
+    hides Android/data from every file manager and from MTP, so that was never
+    possible on a modern device, and it is the reason setup now arrives as a
+    pasted bundle. With nothing needing to reach this directory from outside,
+    private storage is strictly better: not world-readable, survives app
+    updates, removed on uninstall.
     """
     from com.chaquo.python import Python
     ctx = Python.getPlatform().getApplication()
-    return str(ctx.getExternalFilesDir(None).getAbsolutePath())
+    return str(ctx.getFilesDir().getAbsolutePath())
 
 
 def data_dir():
