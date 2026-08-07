@@ -329,6 +329,32 @@ All offline, no Google, no network, fitting the existing demo-mode suite.
 
 ---
 
+## Follow-on: the debug APK undercuts Part 0
+
+Not part of this work, but it is a direct consequence of Part 0 and must not be
+forgotten.
+
+The intended distribution is a GitHub release that people sideload — no Play
+Store, which correctly avoids the $25 Play Console fee, the closed-testing
+requirement, and Google review. Because OurCal is bring-your-own OAuth client
+(`README.md:81-91`), it also needs no OAuth verification: anyone may install it,
+and anyone willing to do their own Google Cloud step can use it.
+
+But `build-android.sh:55` ships `app-debug.apk`, and the generated
+`build.gradle` configures only a `debug` build type. That means:
+
+- **The universal debug keystore.** Every Android SDK ships the same key
+  (password `android`). A publicly downloadable APK signed with it can be
+  replaced by anyone's build of the same package name, installing as an update.
+- **`android:debuggable="true"`.** `adb shell run-as <pkg>` reads the app's
+  private files on any device with USB debugging enabled — which is precisely
+  how this project's own `run-as` fallback was proposed. Part 0 moves refresh
+  tokens into private internal storage; debuggable makes that privacy nominal.
+
+A public release therefore needs a release build signed with a project keystore,
+and `.github/workflows/release.yml` — currently `.dmg` only — needs an Android
+job with the SDK and Gradle caching called for in `NOTES-android.md:74-77`.
+
 ## Out of scope
 
 - LAN handoff and QR transport.
