@@ -22,6 +22,7 @@
 - Salt 16 bytes, nonce 16 bytes, MAC 32 bytes.
 - Error strings shown to users are specified verbatim in the spec's error table — copy them exactly; tests assert on them.
 - Work on branch `android-setup-import`, which already exists and holds the spec.
+- A prior session's work is **stashed**, not committed: the `tz()` Android fallback, `VERSION = "1.0.1"`, and `TestTimezone`. So at HEAD `ourcal.tz()` does not exist and `VERSION` is `"1.0.0"` — do not reference either. The stash must be restored before any APK is built (`packaging/build-android.sh` refuses on a version mismatch, and Android has no tz database without the fallback).
 
 ---
 
@@ -988,7 +989,7 @@ class TestSetupErrorFlag(unittest.TestCase):
             [], {"message": "m", "setup": True})
         self.addCleanup(lambda: setattr(ourcal, "list_account_events", real))
         _, errors = ourcal._google_collect(
-            datetime.datetime(2026, 8, 7, tzinfo=ourcal.tz()))
+            datetime.datetime(2026, 8, 7, tzinfo=datetime.timezone.utc))
         self.assertEqual(errors,
                          [{"label": "Only", "message": "m", "setup": True}])
 ```
