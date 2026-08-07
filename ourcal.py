@@ -923,6 +923,114 @@ def _google_create(payload):
     return {"ok": all(r["ok"] for r in results), "results": results}
 
 
+# ── TRANSFER ────────────────────────────────────────────────────────────
+# Moving a setup onto a phone. Android 11+ hides Android/data from every file
+# manager and from MTP, so a sideloaded app cannot be handed a file at all —
+# the setup crosses as one pasted, passphrase-encrypted string instead.
+BUNDLE_PREFIX = "ourcal1."
+_KDF_ROUNDS = 600000            # the OWASP figure for PBKDF2-HMAC-SHA256
+_SALT_LEN = 16
+_NONCE_LEN = 16
+_MAC_LEN = 32
+_TRUNCATED = "The bundle looks truncated — paste the whole thing."
+
+
+class BundleError(Exception):
+    """Anything wrong with a bundle. The message is shown to the user."""
+
+
+def _bundle_keys(passphrase, salt):
+    """Split one derived secret into an encryption key and a MAC key.
+
+    PBKDF2 rather than scrypt: scrypt is the better primitive, but its
+    availability depends on OpenSSL build flags that cannot be checked on
+    Chaquopy without the device. pbkdf2_hmac exists wherever hashlib does.
+    """
+    import hashlib
+    dk = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt,
+                             _KDF_ROUNDS, dklen=64)
+    return dk[:32], dk[32:]
+
+
+def _keystream(enc_key, nonce, length):
+    """SHA-256 in counter mode.
+
+    Not a vetted cipher, and deliberately so: the stdlib has no AES, and
+    adding `cryptography` would put a native wheel into an Android build that
+    has none and currently builds clean. Conservative construction, recorded
+    as an accepted risk in the design doc rather than left as an accident.
+    """
+    import hashlib
+    out = bytearray()
+    counter = 0
+    while len(out) < length:
+        out += hashlib.sha256(
+            enc_key + nonce + counter.to_bytes(8, "big")).digest()
+        counter += 1
+    return bytes(out[:length])
+
+
+def _xor(data, stream):
+    return bytes(a ^ b for a, b in zip(data, stream))
+
+
+def make_bundle(files, passphrase):
+    """Pack {name: contents} into one pasteable encrypted string."""
+    import base64
+    import gzip
+    import hashlib
+    import hmac
+    plain = gzip.compress(json.dumps({"v": 1, "files": files}).encode("utf-8"))
+    salt, nonce = os.urandom(_SALT_LEN), os.urandom(_NONCE_LEN)
+    enc_key, mac_key = _bundle_keys(passphrase, salt)
+    ct = _xor(plain, _keystream(enc_key, nonce, len(plain)))
+    mac = hmac.new(mac_key, b"ourcal1" + salt + nonce + ct,
+                   hashlib.sha256).digest()
+    raw = salt + nonce + ct + mac
+    return BUNDLE_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def open_bundle(bundle, passphrase):
+    """Unpack a bundle to {name: contents}. Raises BundleError."""
+    import base64
+    import gzip
+    import hashlib
+    import hmac
+    text = (bundle or "").strip()
+    if not text.startswith(BUNDLE_PREFIX):
+        raise BundleError("That doesn't look like an OurCal bundle.")
+    body = text[len(BUNDLE_PREFIX):]
+    try:
+        raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+    except Exception:
+        raise BundleError(_TRUNCATED)
+    if len(raw) <= _SALT_LEN + _NONCE_LEN + _MAC_LEN:
+        raise BundleError(_TRUNCATED)    # framing only, no ciphertext
+    salt = raw[:_SALT_LEN]
+    nonce = raw[_SALT_LEN:_SALT_LEN + _NONCE_LEN]
+    ct = raw[_SALT_LEN + _NONCE_LEN:-_MAC_LEN]
+    mac = raw[-_MAC_LEN:]
+    enc_key, mac_key = _bundle_keys(passphrase, salt)
+    expected = hmac.new(mac_key, b"ourcal1" + salt + nonce + ct,
+                        hashlib.sha256).digest()
+    # Encrypt-then-MAC: a wrong passphrase and a tampered bundle share one
+    # message, and neither reaches the decrypt path below.
+    if not hmac.compare_digest(mac, expected):
+        raise BundleError(
+            "Wrong passphrase, or the bundle was altered in transit.")
+    try:
+        payload = json.loads(gzip.decompress(
+            _xor(ct, _keystream(enc_key, nonce, len(ct)))).decode("utf-8"))
+        files = payload["files"]
+        if not isinstance(files, dict) or not all(
+                isinstance(k, str) and isinstance(v, str)
+                for k, v in files.items()):
+            raise ValueError("bad shape")
+    except Exception:
+        raise BundleError("The bundle is corrupt.")
+    return files
+
+
 # ── HTML ────────────────────────────────────────────────────────────────
 PAGE = r"""<!doctype html>
 <html lang="en">

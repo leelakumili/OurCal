@@ -2018,5 +2018,85 @@ class TestAndroidDataDir(unittest.TestCase):
                          "/android/files/credentials.json")
 
 
+class TestBundleRoundTrip(unittest.TestCase):
+    """The bundle crosses an untrusted channel — it carries live refresh
+    tokens, and any convenient Mac-to-phone text route touches a cloud."""
+
+    FILES = {"credentials.json": '{"installed": {"client_id": "abc"}}',
+             "accounts.json": '[{"label": "L", "email": "l@example.com"}]',
+             "token_l.json": '{"refresh_token": "1//secret"}'}
+
+    def test_round_trips_every_file_byte_for_byte(self):
+        b = ourcal.make_bundle(self.FILES, "correct horse")
+        self.assertEqual(ourcal.open_bundle(b, "correct horse"), self.FILES)
+
+    def test_bundle_is_one_pasteable_line(self):
+        b = ourcal.make_bundle(self.FILES, "pw")
+        self.assertTrue(b.startswith("ourcal1."))
+        self.assertNotIn("\n", b)
+
+    def test_the_plaintext_is_not_recoverable_from_the_bundle(self):
+        b = ourcal.make_bundle(self.FILES, "pw")
+        self.assertNotIn("1//secret", b)
+        self.assertNotIn("l@example.com", b)
+
+    def test_two_exports_of_the_same_files_differ(self):
+        # Fresh salt and nonce each time; identical bundles would leak that
+        # nothing changed between two exports.
+        a = ourcal.make_bundle(self.FILES, "pw")
+        b = ourcal.make_bundle(self.FILES, "pw")
+        self.assertNotEqual(a, b)
+        self.assertEqual(ourcal.open_bundle(a, "pw"),
+                         ourcal.open_bundle(b, "pw"))
+
+    def test_survives_being_pasted_with_surrounding_whitespace(self):
+        b = ourcal.make_bundle(self.FILES, "pw")
+        self.assertEqual(ourcal.open_bundle("\n  " + b + "  \n", "pw"),
+                         self.FILES)
+
+
+class TestBundleRejection(unittest.TestCase):
+    FILES = {"credentials.json": '{"installed": {}}'}
+
+    def test_wrong_passphrase(self):
+        b = ourcal.make_bundle(self.FILES, "right")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(b, "wrong")
+        self.assertIn("Wrong passphrase", str(cm.exception))
+
+    def test_a_single_flipped_byte_is_caught_by_the_mac(self):
+        import base64
+        b = ourcal.make_bundle(self.FILES, "pw")
+        body = b[len("ourcal1."):]
+        raw = bytearray(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        raw[40] ^= 1                     # inside the ciphertext
+        tampered = "ourcal1." + base64.urlsafe_b64encode(
+            bytes(raw)).decode().rstrip("=")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(tampered, "pw")
+        # Tampering and a wrong passphrase are deliberately indistinguishable.
+        self.assertIn("Wrong passphrase", str(cm.exception))
+
+    def test_missing_prefix(self):
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle("just some text", "pw")
+        self.assertIn("doesn't look like an OurCal bundle", str(cm.exception))
+
+    def test_truncated_bundle(self):
+        b = ourcal.make_bundle(self.FILES, "pw")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(b[:20], "pw")
+        self.assertIn("truncated", str(cm.exception))
+
+    def test_empty_input(self):
+        with self.assertRaises(ourcal.BundleError):
+            ourcal.open_bundle("", "pw")
+
+    def test_prefix_with_nothing_after_it(self):
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle("ourcal1.", "pw")
+        self.assertIn("truncated", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
