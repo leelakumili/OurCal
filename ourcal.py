@@ -1452,6 +1452,9 @@ PAGE = r"""<!doctype html>
   <div class="chips" id="chips"></div>
   <div id="banner"></div>
   <div id="agenda"></div>
+  <div style="text-align:center;margin-top:28px;font-size:12px">
+    <a class="setup-link" href="/setup" style="color:var(--muted)">Set up this device</a>
+  </div>
 </div>
 
 <div class="modal" id="modal">
@@ -1635,7 +1638,13 @@ function render(){
   chips.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{ const l=c.getAttribute("data-label"); hidden.has(l)?hidden.delete(l):hidden.add(l); render(); });
 
   const banner=document.getElementById("banner");
-  banner.innerHTML=(DATA.errors&&DATA.errors.length)?DATA.errors.map(e=>`<div class="banner">⚠️ Couldn't refresh <b>${esc(e.label)}</b> — ${esc(e.message)}</div>`).join(""):"";
+  const errs=DATA.errors||[];
+  // Every account failing for the same missing credentials.json is one
+  // problem with one fix, not N problems. Any other mix keeps the
+  // per-account banners: an expired token must not hide behind "not set up".
+  banner.innerHTML = (errs.length && errs.every(e=>e.setup))
+    ? `<div class="banner">⚠️ OurCal isn't set up on this device yet. <a class="setup-link" href="/setup">Set up this device</a></div>`
+    : errs.map(e=>`<div class="banner">⚠️ Couldn't refresh <b>${esc(e.label)}</b> — ${esc(e.message)}</div>`).join("");
 
   const box=document.getElementById("agenda");
   const evs=DATA.events.filter(visible);

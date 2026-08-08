@@ -1951,6 +1951,23 @@ class TestPageStructure(unittest.TestCase):
         # happens is that every occurrence before the new date disappears.
         self.assertIn("rebase", ourcal.PAGE.lower())
 
+    def test_banner_collapses_when_the_device_is_unset_up(self):
+        # Four accounts with no credentials.json produced four identical walls
+        # of text naming a path the user cannot reach. One banner with a way
+        # out replaces them.
+        self.assertIn("errs.every(e=>e.setup)", ourcal.PAGE)
+        self.assertIn("isn't set up on this device yet", ourcal.PAGE)
+        self.assertIn("Set up this device", ourcal.PAGE)
+
+    def test_per_account_banners_survive_for_other_failures(self):
+        # One expired token must not hide behind a "not set up" message.
+        self.assertIn("Couldn't refresh", ourcal.PAGE)
+
+    def test_setup_stays_reachable_after_setup_succeeds(self):
+        # The banner disappears once it works; re-importing after a revoked
+        # token must not require breaking the app first.
+        self.assertIn('class="setup-link" href="/setup"', ourcal.PAGE)
+
 
 class TestAndroidProbe(unittest.TestCase):
     """The bug this replaces: is_android() imported a Java package, which
