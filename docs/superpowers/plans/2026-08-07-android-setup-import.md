@@ -1419,13 +1419,26 @@ Replace `ourcal.py:1265` (the single `banner.innerHTML=...` line) with:
 
 - [ ] **Step 4: Add the permanent footer link**
 
-Find the closing `</div>` of `<div class="wrap">` in `PAGE` and insert immediately before it:
+In `PAGE`, find this exact three-line block — it is the end of `<div class="wrap">`, and the only place these two ids sit together:
 
 ```html
-<div style="text-align:center;margin-top:28px;font-size:12px">
-  <a class="setup-link" href="/setup" style="color:var(--muted)">Set up this device</a>
+  <div id="banner"></div>
+  <div id="agenda"></div>
 </div>
 ```
+
+Replace it with:
+
+```html
+  <div id="banner"></div>
+  <div id="agenda"></div>
+  <div style="text-align:center;margin-top:28px;font-size:12px">
+    <a class="setup-link" href="/setup" style="color:var(--muted)">Set up this device</a>
+  </div>
+</div>
+```
+
+Do not search by line number — earlier tasks insert code above `PAGE`, so the numbers have shifted.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
