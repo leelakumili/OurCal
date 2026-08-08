@@ -2446,11 +2446,30 @@ class TestExportCli(_TmpData, unittest.TestCase):
         tmp = self._tmp_data()
         with open(os.path.join(tmp, "credentials.json"), "w") as f:
             f.write("{}")
-        answers = iter(["one", "two"])
+        answers = iter(["correct horse battery", "correct horse battery!"])
         real = getpass.getpass
         getpass.getpass = lambda *a, **k: next(answers)
         self.addCleanup(lambda: setattr(getpass, "getpass", real))
         self.assertEqual(ourcal.export_cli(), 1)
+
+    def test_refuses_a_short_passphrase(self):
+        # The design's threat model assumes the ciphertext is obtained, at
+        # which point PBKDF2 is the only defence and a weak passphrase is the
+        # whole game — this bundle carries live Google refresh tokens.
+        import contextlib
+        import getpass
+        import io
+        tmp = self._tmp_data()
+        with open(os.path.join(tmp, "credentials.json"), "w") as f:
+            f.write("{}")
+        real = getpass.getpass
+        getpass.getpass = lambda *a, **k: "short"
+        self.addCleanup(lambda: setattr(getpass, "getpass", real))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(ourcal.export_cli(), 1)
+        self.assertIn("12", err.getvalue())
+        self.assertEqual(os.listdir(tmp), ["credentials.json"])  # nothing new
 
     def test_prints_only_the_bundle_on_stdout(self):
         # `./ourcal.py --export | pbcopy` must pipe the bundle and nothing
@@ -2462,16 +2481,20 @@ class TestExportCli(_TmpData, unittest.TestCase):
         with open(os.path.join(tmp, "credentials.json"), "w") as f:
             f.write('{"installed": {}}')
         real = getpass.getpass
-        getpass.getpass = lambda *a, **k: "pw"
+        getpass.getpass = lambda *a, **k: "a passphrase over 12 chars"
         self.addCleanup(lambda: setattr(getpass, "getpass", real))
         out = io.StringIO()
-        with contextlib.redirect_stdout(out), \
-                contextlib.redirect_stderr(io.StringIO()):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             self.assertEqual(ourcal.export_cli(), 0)
         printed = out.getvalue().strip()
         self.assertEqual(len(printed.splitlines()), 1)
-        self.assertEqual(ourcal.open_bundle(printed, "pw"),
-                         {"credentials.json": '{"installed": {}}'})
+        self.assertEqual(
+            ourcal.open_bundle(printed, "a passphrase over 12 chars"),
+            {"credentials.json": '{"installed": {}}'})
+        # The live-refresh-token warning is a specified requirement — it must
+        # actually reach stderr, not just avoid stdout.
+        self.assertIn("refresh tokens", err.getvalue())
 
 
 class TestSetupStatus(_TmpData, unittest.TestCase):

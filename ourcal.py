@@ -957,6 +957,11 @@ _SALT_LEN = 16
 _NONCE_LEN = 16
 _MAC_LEN = 32
 _TRUNCATED = "The bundle looks truncated — paste the whole thing."
+# The threat model assumes the ciphertext gets obtained — it routes through a
+# cloud clipboard, a drafts folder or a chat backup — at which point PBKDF2 is
+# the only defence left and a weak passphrase is the whole game. Four live
+# refresh tokens are worth more than "not empty".
+_MIN_PASSPHRASE_LEN = 12
 
 
 class BundleError(Exception):
@@ -1160,9 +1165,12 @@ def export_cli():
         print(f"OurCal: no credentials.json in {data_dir()} — nothing to "
               "export.", file=sys.stderr)
         return 1
-    first = getpass.getpass("Passphrase for the bundle: ")
-    if not first:
-        print("OurCal: a passphrase is required.", file=sys.stderr)
+    first = getpass.getpass(
+        f"Passphrase for the bundle (at least {_MIN_PASSPHRASE_LEN} "
+        "characters): ")
+    if len(first) < _MIN_PASSPHRASE_LEN:
+        print(f"OurCal: a passphrase must be at least {_MIN_PASSPHRASE_LEN} "
+              "characters — nothing was written.", file=sys.stderr)
         return 1
     if first != getpass.getpass("Repeat it: "):
         # A typo here would produce a bundle nobody can ever open.
