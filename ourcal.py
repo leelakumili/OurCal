@@ -783,11 +783,20 @@ def run_oauth_flow(flow):
                                  timeout_seconds=300)
 
 
+class NeedsSignIn(Exception):
+    """This account has no usable token and a human must sign in.
+
+    Raised rather than opening a browser: creds_for runs inside the
+    agenda request, and launching a browser there blocked that request
+    for up to 300 seconds per account, sequentially. Sign-in is an
+    explicit button now, on both platforms.
+    """
+
+
 def creds_for(label, email):
-    """Load/refresh creds for an account; run InstalledAppFlow if absent."""
+    """Load/refresh creds for an account; raise NeedsSignIn if absent."""
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
-    from google_auth_oauthlib.flow import InstalledAppFlow
     path = token_path(label)
     creds = None
     if os.path.exists(path):
@@ -797,14 +806,8 @@ def creds_for(label, email):
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     else:
-        # Name the account before the browser opens: the prompts are identical
-        # otherwise, and picking the wrong one silently mislabels its events.
-        print(f"\nOurCal: sign in as {email}   (account “{label}”)\n"
-              f"        Pick this exact account in the browser window.\n",
-              flush=True)
-        flow = InstalledAppFlow.from_client_config(
-            json.loads(client_config_text()), SCOPES)
-        creds = run_oauth_flow(flow)
+        client_config_text()      # raises FileNotFoundError if absent at all
+        raise NeedsSignIn(label)
     # Explicit encoding, not the platform default: this file crosses Mac and
     # Android like every other user file, so it must not depend on either
     # one's ambient locale.
@@ -822,12 +825,13 @@ def service_for(label, email):
 def list_account_events(label, email, time_min, time_max):
     """Return (normalized_events, error_or_None) for one account.
 
-    The error, when present, is a dict {"message": str, "setup": bool} —
-    not a bare string. "setup" is True only when the fix is to complete
-    setup (a missing credentials.json); it is False for a dead token, a
-    revoked grant, or a signed-in account that doesn't match its label —
-    none of those have a "redo setup" way out, so the page must not offer
-    one for them.
+    The error, when present, is a dict {"message": str, "setup": bool,
+    "signin": bool} — not a bare string. "setup" is True only when the fix
+    is to complete setup (a missing credentials.json); "signin" is True
+    only when this one account simply has no token yet. It is False for a
+    dead token, a revoked grant, or a signed-in account that doesn't match
+    its label — none of those have a "redo setup" or "sign in" way out, so
+    the page must not offer one for them.
     """
     try:
         svc = service_for(label, email)
@@ -843,7 +847,7 @@ def list_account_events(label, email, time_min, time_max):
         mismatch = account_mismatch(label, email, cals)
         if mismatch:
             # never file another account's events here
-            return [], {"message": mismatch, "setup": False}
+            return [], {"message": mismatch, "setup": False, "signin": False}
         for cal in cals:
             if not should_include_calendar(cal):
                 continue
@@ -861,13 +865,18 @@ def list_account_events(label, email, time_min, time_max):
                 if not page:
                     break
         return events, None
+    except NeedsSignIn:
+        # Setup is fine; this account simply has no token yet. Different
+        # fix, different button — so the page must be able to tell them
+        # apart without reading the message text.
+        return [], {"message": "not signed in", "setup": False, "signin": True}
     except FileNotFoundError as e:
         # Setup incomplete, not an auth failure: "re-auth" would mislead. The
         # flag lets the page offer setup without string-matching this text.
-        return [], {"message": str(e), "setup": True}
+        return [], {"message": str(e), "setup": True, "signin": False}
     except Exception as e:  # per-account isolation
         return [], {"message": f"{type(e).__name__} — re-auth or check access",
-                    "setup": False}
+                    "setup": False, "signin": False}
 
 
 def _google_collect(now, days=None):
@@ -2008,7 +2017,9 @@ function render(){
   // per-account banners: an expired token must not hide behind "not set up".
   banner.innerHTML = (errs.length && errs.every(e=>e.setup))
     ? `<div class="banner">⚠️ OurCal isn't set up on this device yet. <a class="setup-link" href="/setup" style="color:var(--accent)">Set up this device</a></div>`
-    : errs.map(e=>`<div class="banner">⚠️ Couldn't refresh <b>${esc(e.label)}</b> — ${esc(e.message)}</div>`).join("");
+    : errs.map(e=>`<div class="banner">⚠️ ${e.signin
+        ? `<b>${esc(e.label)}</b> isn't signed in. <a class="setup-link" href="/setup" style="color:var(--accent)">Sign in</a>`
+        : `Couldn't refresh <b>${esc(e.label)}</b> — ${esc(e.message)}`}</div>`).join("");
 
   const box=document.getElementById("agenda");
   const evs=DATA.events.filter(visible);

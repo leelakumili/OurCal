@@ -3349,5 +3349,34 @@ class TestSignInAccountCheck(_TmpData, unittest.TestCase):
         self.assertTrue(os.path.exists(ourcal.token_path("One")))
 
 
+class TestNeedsSignIn(_TmpData, unittest.TestCase):
+    """Loading the agenda must never open a browser. It did, four times,
+    sequentially, inside one HTTP request."""
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        with open(os.path.join(self.tmp, "credentials.json"), "w",
+                  encoding="utf-8") as f:
+            f.write('{"installed": {"client_id": "x"}}')
+
+    def test_creds_for_raises_instead_of_launching_a_browser(self):
+        launched = []
+        real = ourcal.run_oauth_flow
+        ourcal.run_oauth_flow = lambda flow: launched.append(1)
+        self.addCleanup(lambda: setattr(ourcal, "run_oauth_flow", real))
+        with self.assertRaises(ourcal.NeedsSignIn):
+            ourcal.creds_for("One", "one@example.com")
+        self.assertEqual(launched, [])      # nothing opened
+
+    def test_the_error_entry_is_flagged_for_sign_in(self):
+        real = ourcal.service_for
+        ourcal.service_for = lambda label, email: (_ for _ in ()).throw(
+            ourcal.NeedsSignIn("One"))
+        self.addCleanup(lambda: setattr(ourcal, "service_for", real))
+        _, err = ourcal.list_account_events("One", "one@example.com", "a", "b")
+        self.assertTrue(err["signin"])
+        self.assertFalse(err["setup"])      # setup is fine; sign-in is not
+
+
 if __name__ == "__main__":
     unittest.main()
