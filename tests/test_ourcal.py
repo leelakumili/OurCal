@@ -2417,6 +2417,33 @@ class TestSetupErrorFlag(unittest.TestCase):
         self.assertEqual(errors,
                          [{"label": "Only", "message": "m", "setup": True}])
 
+    def test_a_wrong_signed_in_account_is_not_flagged_as_setup(self):
+        # Drives the real list_account_events to the mismatch branch, which no
+        # other test reaches: service_for is faked to SUCCEED and return
+        # somebody else's primary calendar. Left as a bare string, this site
+        # would blow up at **err in _google_collect only for a real user.
+        class _Cals:
+            def list(self, pageToken=None):
+                return self
+
+            def execute(self):
+                return {"items": [{"id": "someone.else@example.com",
+                                   "primary": True}]}
+
+        class _Svc:
+            def calendarList(self):
+                return _Cals()
+
+        real = ourcal.service_for
+        ourcal.service_for = lambda label, email: _Svc()
+        self.addCleanup(lambda: setattr(ourcal, "service_for", real))
+        events, err = ourcal.list_account_events(
+            "Leela", "leela@example.com", "a", "b")
+        self.assertEqual(events, [])
+        self.assertFalse(err["setup"])          # not a setup problem
+        self.assertIn("someone.else@example.com", err["message"])
+        self.assertIn("leela@example.com", err["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -764,7 +764,15 @@ def service_for(label, email):
 
 
 def list_account_events(label, email, time_min, time_max):
-    """Return (normalized_events, error_or_None) for one account."""
+    """Return (normalized_events, error_or_None) for one account.
+
+    The error, when present, is a dict {"message": str, "setup": bool} —
+    not a bare string. "setup" is True only when the fix is to complete
+    setup (a missing credentials.json); it is False for a dead token, a
+    revoked grant, or a signed-in account that doesn't match its label —
+    none of those have a "redo setup" way out, so the page must not offer
+    one for them.
+    """
     try:
         svc = service_for(label, email)
         events = []
