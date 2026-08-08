@@ -2054,6 +2054,13 @@ class TestBundleRoundTrip(unittest.TestCase):
         self.assertEqual(ourcal.open_bundle("\n  " + b + "  \n", "pw"),
                          self.FILES)
 
+    def test_survives_being_hard_wrapped_by_a_mail_client(self):
+        # The bundle travels through a messaging app by design, and those wrap
+        # long strings. A newline every 72 chars must not read as truncation.
+        b = ourcal.make_bundle(self.FILES, "pw")
+        wrapped = "\n".join(b[i:i + 72] for i in range(0, len(b), 72))
+        self.assertEqual(ourcal.open_bundle(wrapped, "pw"), self.FILES)
+
 
 class TestBundleRejection(unittest.TestCase):
     FILES = {"credentials.json": '{"installed": {}}'}
@@ -2096,6 +2103,23 @@ class TestBundleRejection(unittest.TestCase):
         with self.assertRaises(ourcal.BundleError) as cm:
             ourcal.open_bundle("ourcal1.", "pw")
         self.assertIn("truncated", str(cm.exception))
+
+
+class TestBundleWireFormat(unittest.TestCase):
+    """A known-answer test, so the format cannot drift silently.
+
+    Every other test round-trips through our own code and would stay green
+    through a format change — while bundles from a different build stopped
+    opening. The phone runs a sideloaded APK that does not auto-update, so a
+    Mac one version ahead of the phone is the normal case.
+    """
+
+    BUNDLE = "ourcal1.gGku7vOgzDk2FEZ4T-IOtaV3R1wMn_nJb-_qX2QSP_3nnF-iTg9pzFigrc0v0eIGAwSGmccTmBOizbr4t4P_i8Dk4JGS8u-EujUGjB8SL_FyKhEgp1FrxD1rpwFzwlLC82otTh5wUbeHTnIxXOqZpaFBxahB_QdD4WnfxjFy5e8uI3bYLn0h27TZv_5TgWu-_slcn-KPnw7hre6wNB0"
+
+    def test_opens_a_bundle_produced_by_an_earlier_build(self):
+        self.assertEqual(
+            ourcal.open_bundle(self.BUNDLE, "known-answer-passphrase"),
+            {"credentials.json": '{"installed": {"client_id": "kat"}}'})
 
 
 if __name__ == "__main__":

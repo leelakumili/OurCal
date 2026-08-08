@@ -953,7 +953,7 @@ def _bundle_keys(passphrase, salt):
 
 
 def _keystream(enc_key, nonce, length):
-    """SHA-256 in counter mode.
+    """HKDF-Expand shape: a keyed PRF in counter mode.
 
     Not a vetted cipher, and deliberately so: the stdlib has no AES, and
     adding `cryptography` would put a native wheel into an Android build that
@@ -961,11 +961,12 @@ def _keystream(enc_key, nonce, length):
     as an accepted risk in the design doc rather than left as an accident.
     """
     import hashlib
+    import hmac
     out = bytearray()
     counter = 0
     while len(out) < length:
-        out += hashlib.sha256(
-            enc_key + nonce + counter.to_bytes(8, "big")).digest()
+        out += hmac.new(enc_key, nonce + counter.to_bytes(8, "big"),
+                        hashlib.sha256).digest()
         counter += 1
     return bytes(out[:length])
 
@@ -996,7 +997,7 @@ def open_bundle(bundle, passphrase):
     import gzip
     import hashlib
     import hmac
-    text = (bundle or "").strip()
+    text = "".join((bundle or "").split())
     if not text.startswith(BUNDLE_PREFIX):
         raise BundleError("That doesn't look like an OurCal bundle.")
     body = text[len(BUNDLE_PREFIX):]
