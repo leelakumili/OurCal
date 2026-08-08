@@ -2445,5 +2445,92 @@ class TestSetupErrorFlag(unittest.TestCase):
         self.assertIn("leela@example.com", err["message"])
 
 
+class TestSetupRoutes(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ["OURCAL_DEMO"] = "1"
+        cls.server = ourcal.make_server(0)
+        cls.port = cls.server.server_address[1]
+        cls.t = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.t.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _get(self, path):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}") as r:
+            return r.status, r.read().decode()
+
+    def _post(self, path, obj):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(obj).encode(), method="POST",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read().decode())
+
+    def test_setup_page_is_served(self):
+        status, body = self._get("/setup")
+        self.assertEqual(status, 200)
+        self.assertIn("Set up this device", body)
+        self.assertIn("/api/import", body)
+
+    def test_status_endpoint_shape(self):
+        _, body = self._get("/api/status")
+        s = json.loads(body)
+        self.assertEqual(sorted(s), ["accounts", "accountsFromFile", "android",
+                                     "dataDir", "hasCredentials", "signedIn"])
+
+    def test_import_reports_a_bad_bundle_without_a_500(self):
+        status, body = self._post("/api/import",
+                                  {"bundle": "nonsense", "passphrase": "x"})
+        self.assertEqual(status, 200)
+        self.assertFalse(body["ok"])
+        self.assertIn("doesn't look like an OurCal bundle", body["error"])
+
+    def test_import_reports_a_wrong_passphrase(self):
+        bundle = ourcal.make_bundle({"credentials.json": "{}"}, "right")
+        _, body = self._post("/api/import",
+                             {"bundle": bundle, "passphrase": "wrong"})
+        self.assertFalse(body["ok"])
+        self.assertIn("Wrong passphrase", body["error"])
+
+    def test_import_writes_a_real_bundle(self):
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real_dir, real_accounts = ourcal.data_dir, ourcal.ACCOUNTS
+        ourcal.data_dir = lambda: tmp
+        self.addCleanup(lambda: setattr(ourcal, "data_dir", real_dir))
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
+        bundle = ourcal.make_bundle(
+            {"credentials.json": '{"installed": {}}',
+             "accounts.json": json.dumps(
+                 [{"label": "Phone", "email": "p@example.com"}])}, "pw")
+        _, body = self._post("/api/import",
+                             {"bundle": bundle, "passphrase": "pw"})
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["written"],
+                         ["accounts.json", "credentials.json"])
+        self.assertEqual(body["accounts"], 1)
+        self.assertEqual(sorted(os.listdir(tmp)),
+                         ["accounts.json", "credentials.json"])
+
+
+class TestSetupPageStructure(unittest.TestCase):
+    def test_page_has_the_markers_it_needs(self):
+        for marker in ['id="bundle"', 'id="passphrase"', 'id="doImport"',
+                       'id="result"', 'id="diag"', "/api/import",
+                       "/api/status", "--export", "prefers-color-scheme"]:
+            self.assertIn(marker, ourcal.SETUP_PAGE, f"missing {marker!r}")
+
+    def test_page_reports_the_resolved_data_dir(self):
+        # The diagnostic that would have made the seam bug obvious.
+        self.assertIn("dataDir", ourcal.SETUP_PAGE)
+        self.assertIn("android", ourcal.SETUP_PAGE)
+
+
 if __name__ == "__main__":
     unittest.main()

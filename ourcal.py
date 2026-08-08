@@ -1182,6 +1182,140 @@ def setup_status():
     }
 
 
+SETUP_PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OurCal — set up this device</title>
+<style>
+  :root{--bg:#f5f6f8;--card:#fff;--text:#161a1d;--muted:#67717b;--border:#e4e7eb;
+        --accent:#2a78d6;--danger:#d64545;--ok:#1baf7a;color-scheme:light}
+  @media (prefers-color-scheme:dark){:root{--bg:#0f1419;--card:#171d24;
+        --text:#e6eaed;--muted:#98a2ac;--border:#29323b;--accent:#5b9cf0;
+        --danger:#f07a7a;--ok:#3fd39c;color-scheme:dark}}
+  *{box-sizing:border-box}html,body{margin:0}
+  body{background:var(--bg);color:var(--text);font-size:15px;line-height:1.45;
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:640px;margin:0 auto;padding:20px 16px 60px}
+  h1{font-size:20px;margin:0 0 4px;font-weight:750;letter-spacing:-.02em}
+  a{color:var(--accent)}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;
+        padding:14px;margin-bottom:14px}
+  label{display:block;font-size:13px;font-weight:600;margin:0 0 6px}
+  textarea,input{width:100%;font:inherit;padding:9px 11px;border-radius:9px;
+        border:1px solid var(--border);background:var(--bg);color:var(--text)}
+  textarea{min-height:120px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+        font-size:12px;resize:vertical;word-break:break-all}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+        background:var(--bg);border:1px solid var(--border);border-radius:6px;
+        padding:2px 5px}
+  button{font:inherit;cursor:pointer;border-radius:9px;padding:10px 16px;
+        border:1px solid var(--accent);background:var(--accent);color:#fff;
+        font-weight:600;margin-top:12px}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .msg{margin-top:12px;font-size:13px;padding:10px 12px;border-radius:9px;
+        border:1px solid var(--border);border-left:3px solid var(--muted)}
+  .msg.bad{border-left-color:var(--danger)}
+  .msg.good{border-left-color:var(--ok)}
+  .diag{color:var(--muted);font-size:12px;margin-top:18px;
+        font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+        word-break:break-all}
+</style>
+</head>
+<body><div class="wrap">
+  <h1>Set up this device</h1>
+  <div class="sub"><a href="/">&larr; back to the agenda</a></div>
+
+  <div class="card">
+    <label>1 &middot; On your computer</label>
+    <div style="font-size:13px;color:var(--muted)">
+      Run <code>./ourcal.py --export | pbcopy</code>, choose a passphrase, then
+      send yourself the bundle. It is encrypted, but it carries live Google
+      refresh tokens &mdash; treat it as a secret.
+    </div>
+  </div>
+
+  <div class="card">
+    <label for="bundle">2 &middot; Bundle</label>
+    <textarea id="bundle" placeholder="ourcal1&hellip;" spellcheck="false"
+              autocapitalize="off" autocorrect="off"></textarea>
+    <label for="passphrase" style="margin-top:12px">3 &middot; Passphrase</label>
+    <input id="passphrase" type="password" autocomplete="off">
+    <button id="doImport">Import</button>
+    <div id="result"></div>
+  </div>
+
+  <div class="diag" id="diag">checking this device&hellip;</div>
+</div>
+<script>
+function esc(s){return String(s).replace(/[&<>"]/g,c=>(
+  {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));}
+
+function diag(s){
+  document.getElementById("diag").innerHTML =
+    "data dir: " + esc(s.dataDir) + "<br>" +
+    "android branch: " + (s.android ? "live" : "not active") + "<br>" +
+    "credentials.json: " + (s.hasCredentials ? "present" : "missing") + "<br>" +
+    "accounts: " + s.accounts + (s.accountsFromFile ? "" : " (placeholders)") +
+    "<br>signed in: " + (s.signedIn.length ? esc(s.signedIn.join(", ")) : "none");
+}
+
+function refresh(){
+  fetch("/api/status").then(r=>r.json()).then(diag)
+    .catch(e=>{document.getElementById("diag").textContent =
+      "could not read device status: " + e;});
+}
+
+document.getElementById("doImport").onclick = function(){
+  const btn = this, out = document.getElementById("result");
+  btn.disabled = true;
+  out.className = "msg";
+  out.textContent = "Importing… this takes a moment (the passphrase is "
+                  + "deliberately slow to check).";
+  fetch("/api/import", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        bundle: document.getElementById("bundle").value,
+        passphrase: document.getElementById("passphrase").value})})
+    .then(r=>r.json())
+    .then(function(d){
+      btn.disabled = false;
+      if(d.ok){
+        out.className = "msg good";
+        out.innerHTML = "Imported " + d.written.length + " file(s): "
+          + esc(d.written.join(", ")) + ".<br>" + d.accounts
+          + " account(s) configured. <a href=\"/\">Open the agenda</a>.";
+        document.getElementById("bundle").value = "";
+        document.getElementById("passphrase").value = "";
+      } else {
+        out.className = "msg bad";
+        out.textContent = d.error || "Import failed.";
+      }
+      refresh();
+    })
+    .catch(function(e){
+      btn.disabled = false;
+      out.className = "msg bad";
+      out.textContent = "Import failed: " + e;
+    });
+};
+
+refresh();
+</script>
+</body></html>"""
+
+
+def import_endpoint(payload):
+    """POST /api/import. A bad bundle is a normal answer, not a 500."""
+    try:
+        return import_bundle(payload.get("bundle", ""),
+                             payload.get("passphrase", ""))
+    except BundleError as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── HTML ────────────────────────────────────────────────────────────────
 PAGE = r"""<!doctype html>
 <html lang="en">
@@ -1909,6 +2043,10 @@ class OurCalHandler(BaseHTTPRequestHandler):
                 q = parse_qs(urlparse(self.path).query)
                 self._send(200, json.dumps(
                     get_events(days=(q.get("days") or [None])[0])))
+            elif self.path == "/setup" or self.path.startswith("/setup?"):
+                self._send(200, SETUP_PAGE, "text/html; charset=utf-8")
+            elif self.path == "/api/status":
+                self._send(200, json.dumps(setup_status()))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception as e:
@@ -1917,7 +2055,7 @@ class OurCalHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             routes = {"/api/create": create_event, "/api/delete": delete_events,
-                      "/api/update": update_events}
+                      "/api/update": update_events, "/api/import": import_endpoint}
             handler = routes.get(self.path)
             if handler is None:
                 self._send(404, json.dumps({"error": "not found"}))
