@@ -84,6 +84,26 @@ download a Desktop OAuth client as `credentials.json`.
 
 Full walkthrough: **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.
 
+### On Android
+
+The Google Cloud step happens on a computer — a phone cannot realistically
+create a project and download a client. Move the finished setup across instead:
+
+```bash
+./ourcal.py --export | pbcopy      # choose a passphrase when asked
+```
+
+Send yourself the bundle, open OurCal on the phone, tap **Set up this device**,
+paste it in, and enter the same passphrase. Your accounts appear without a
+restart.
+
+The bundle is encrypted, but it carries live Google refresh tokens. Use a
+passphrase you would use for a password, and delete the message afterwards.
+
+Android 11+ hides `Android/data` from every file manager and from MTP, so
+copying the files onto the phone directly is not possible — pasting is not a
+workaround for a missing cable, it is the only supported route.
+
 Shipping a shared client secret inside a published app would get it revoked and
 route every user's calendar traffic through one quota — which is why this step
 cannot be done for you.

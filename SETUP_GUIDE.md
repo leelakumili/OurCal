@@ -197,6 +197,20 @@ Another program (or a previous OurCal) holds the port. Free it with
 Delete all `token_*.json` (re-signs in) and/or `.ourcal-venv/` (re-installs
 deps on next run). `credentials.json` stays.
 
+**On Android, every account says `credentials.json is missing`.**
+The device has not been set up. Tap **Set up this device** in the banner, or
+open `/setup` from the footer link, and paste a bundle from `./ourcal.py
+--export`. The footer of that page shows the directory the app resolved: if it
+contains `chaquopy/AssetFinder`, the Android branch is not active and the app
+is running desktop code paths — rebuild from a source tree that includes the
+`is_android()` interpreter probe.
+
+**The setup page rejects my bundle.**
+`Wrong passphrase, or the bundle was altered in transit` means exactly that,
+and the two cases are indistinguishable on purpose. Re-export and re-paste,
+taking care that nothing wrapped or truncated the text — some chat apps insert
+line breaks into long strings.
+
 ---
 
 ## Privacy
