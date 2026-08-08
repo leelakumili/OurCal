@@ -372,6 +372,42 @@ A public release therefore needs a release build signed with a project keystore,
 and `.github/workflows/release.yml` — currently `.dmg` only — needs an Android
 job with the SDK and Gradle caching called for in `NOTES-android.md:74-77`.
 
+## Follow-on: the caller guard closes the browser hole, not the Android one
+
+Found by the whole-branch review and confirmed against a live server, so it is
+recorded here rather than left in a scratch file.
+
+`POST /api/import` writes OAuth credentials to disk. The server binds
+`127.0.0.1`, which does not make it private: `Content-Type: text/plain` is
+CORS-safelisted, so a cross-origin POST is a *simple* request — delivered and
+processed, with only the response unreadable. A hostile page could therefore
+replace `credentials.json` with its own OAuth client, wipe the tokens, and
+harvest the re-authorisation with full calendar scope.
+
+`_local_caller()` closes that: it rejects a foreign `Host` (defeating DNS
+rebinding reads of `/api/status`, which leaks the data directory and every
+account label) and a foreign `Origin` (defeating the cross-site POST). It also
+closes the same pre-existing exposure on `/api/create`, `/api/delete` and
+`/api/update`.
+
+**It does not close the non-browser case, and that is the Android case.** An
+`Origin` check can only authenticate a browser. A native app sends no `Origin`,
+`origin is None` is accepted, and a no-`Origin` POST writing an
+attacker-controlled `credentials.json` was demonstrated. Android does not
+isolate loopback between apps, `PORT` is a fixed 8756 in public source, and the
+API is public source — so this is feasible for a targeted attacker on the exact
+platform this work exists to serve.
+
+The fix is a per-session token: mint `os.urandom` hex at startup, embed it in
+`PAGE` and `SETUP_PAGE`, require it as a header on every `/api/*` request, and
+reject requests without it. Roughly fifteen lines. It was deferred rather than
+bolted on at the end of this work, and belongs with the on-device sign-in cycle,
+which touches this same HTTP surface and should design the two together.
+
+Also unaddressed and pre-existing: no `X-Frame-Options` or `frame-ancestors`, so
+a hostile page can iframe the UI and clickjack it — the framed page's own
+fetches then carry a valid `Origin`. One header closes it.
+
 ## Out of scope
 
 - LAN handoff and QR transport.
