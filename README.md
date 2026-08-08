@@ -206,7 +206,7 @@ matching tag (`git tag v1.0.1 && git push origin v1.0.1`) or running the release
 workflow manually. The workflow refuses to build when the tag and `VERSION`
 disagree.
 
-Android ships as a sideloaded APK from [Releases](../../releases), installed via Android's "Install anyway" prompt — it is unsigned because Play Store verification is not practical for personal projects. See [NOTES-android.md](NOTES-android.md) for the implementation approach.
+Android ships as a sideloaded APK from GitHub Releases instead of the Play Store — Play Protect will warn on install, and tapping "Install anyway" proceeds. The build is currently debug-signed (fine for personal use but a known gap for wider distribution); see [NOTES-android.md](NOTES-android.md) for the release-signing gap.
 
 ## Privacy
 
