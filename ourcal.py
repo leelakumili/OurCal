@@ -763,7 +763,10 @@ def run_oauth_flow(flow):
     the app is foregrounded and has network again.
     """
     if not is_android():
-        return flow.run_local_server(port=0)
+        # Bounded like the Android branch: an abandoned browser tab must not
+        # leave the sign-in state stuck in "waiting" for the whole process,
+        # which would refuse every later sign-in for every account.
+        return flow.run_local_server(port=0, timeout_seconds=300)
 
     import webbrowser
     real_fetch = flow.fetch_token
@@ -1609,18 +1612,30 @@ def _run_signin(label, email):
     Split out so tests can replace it without faking Google. The Android
     specifics — the browser Intent and waiting for DNS to come back after
     the trip to Chrome — already live in run_oauth_flow.
+
+    The signed-in account is checked before the token is written. Google's
+    prompts are identical apart from the address, so picking the wrong one
+    is easy; writing first and detecting later would leave a token filed
+    under someone else's label and report it as success.
     """
     from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build
     flow = InstalledAppFlow.from_client_config(
         json.loads(client_config_text()), SCOPES)
     creds = run_oauth_flow(flow)
+    svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    cals = svc.calendarList().list().execute().get("items", [])
+    actual = primary_email(cals)
+    if actual and actual != (email or "").strip().lower():
+        raise RuntimeError(
+            f"Signed in as {actual}, not {email} — tap Sign in again and "
+            f"pick {email}.")
     with open(token_path(label), "w", encoding="utf-8") as f:
         f.write(creds.to_json())
 
 
 def start_signin(label):
     """Begin a sign-in on a background thread and return immediately."""
-    import threading
     email = _email_for(label)
     if email is None:
         return {"ok": False, "error": f"No account named {label}."}
@@ -1636,7 +1651,15 @@ def start_signin(label):
             _run_signin(label, email)
             _SIGNIN.update({"state": "done", "message": ""})
         except Exception as e:
-            _SIGNIN.update({"state": "error", "message": str(e)})
+            text = str(e)
+            low = text.lower()
+            if "timed out" in low or "timeout" in low:
+                text = "Timed out waiting for Google — tap Sign in again."
+            elif "name or service not known" in low or "getaddrinfo" in low \
+                    or "no address associated" in low:
+                text = ("Couldn't reach Google — check your connection and "
+                        "try again.")
+            _SIGNIN.update({"state": "error", "message": text})
 
     threading.Thread(target=work, daemon=True).start()
     return {"ok": True}

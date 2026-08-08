@@ -1813,7 +1813,9 @@ class TestPlatform(unittest.TestCase):
 
     def test_oauth_flow_is_plain_run_local_server_off_android(self):
         # On desktop, run_oauth_flow must not touch webbrowser or defer the
-        # token exchange — it just runs the standard flow.
+        # token exchange — it just runs the standard flow, bounded the same
+        # way the Android branch already is: an abandoned browser tab must
+        # not wait forever and wedge _SIGNIN in "waiting" for good.
         calls = {}
 
         class FakeFlow:
@@ -1822,7 +1824,7 @@ class TestPlatform(unittest.TestCase):
                 return "creds"
 
         self.assertEqual(ourcal.run_oauth_flow(FakeFlow()), "creds")
-        self.assertEqual(calls["kw"], {"port": 0})  # no android extras
+        self.assertEqual(calls["kw"], {"port": 0, "timeout_seconds": 300})
 
 
 class TestClampDays(unittest.TestCase):
@@ -3232,6 +3234,119 @@ class TestSignInEndpoint(_TmpData, unittest.TestCase):
         r = ourcal.start_signin("Nope")
         self.assertFalse(r["ok"])
         self.assertEqual(ourcal.signin_status()["state"], "idle")
+
+    def test_a_timed_out_flow_gets_the_spec_message(self):
+        # An abandoned browser tab makes run_local_server raise a timeout
+        # after 300s (fix for the desktop branch waiting forever otherwise);
+        # the raw library text is not something to show on a phone screen.
+        self._fake_flow(boom=TimeoutError("Authorization flow timed out"))
+        ourcal.start_signin("One")
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "error")
+        self.assertEqual(s["message"],
+                          "Timed out waiting for Google — tap Sign in again.")
+
+    def test_a_dns_failure_gets_the_spec_message(self):
+        self._fake_flow(boom=OSError("[Errno -2] Name or service not known"))
+        ourcal.start_signin("One")
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "error")
+        self.assertEqual(s["message"],
+                          "Couldn't reach Google — check your connection "
+                          "and try again.")
+
+
+class TestSignInAccountCheck(_TmpData, unittest.TestCase):
+    """The consent screen shows only the address, and it looks identical for
+    every account — picking the wrong one is easy. Before this check,
+    _run_signin wrote whatever token came back regardless of who it
+    belonged to, filing a stranger's token under this label and reporting
+    it as success.
+
+    google_auth_oauthlib and googleapiclient are optional runtime deps not
+    installed where the suite runs (see CONTRIBUTING.md — CI runs tests
+    before either is installed), so both are stubbed via sys.modules
+    rather than required. run_oauth_flow is monkeypatched, same as the
+    existing off-android test for it.
+    """
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        with open(os.path.join(self.tmp, "credentials.json"), "w",
+                  encoding="utf-8") as f:
+            f.write('{"installed": {"client_id": "cid"}}')
+
+        import sys
+        import types
+
+        class _FakeInstalledAppFlow:
+            @classmethod
+            def from_client_config(cls, config, scopes):
+                return cls()
+
+        flow_mod = types.ModuleType("google_auth_oauthlib.flow")
+        flow_mod.InstalledAppFlow = _FakeInstalledAppFlow
+        oauthlib_pkg = types.ModuleType("google_auth_oauthlib")
+        disc_mod = types.ModuleType("googleapiclient.discovery")
+        apiclient_pkg = types.ModuleType("googleapiclient")
+        stubs = {
+            "google_auth_oauthlib": oauthlib_pkg,
+            "google_auth_oauthlib.flow": flow_mod,
+            "googleapiclient": apiclient_pkg,
+            "googleapiclient.discovery": disc_mod,
+        }
+        originals = {name: sys.modules.get(name) for name in stubs}
+        sys.modules.update(stubs)
+
+        def _restore():
+            for name, mod in originals.items():
+                if mod is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = mod
+        self.addCleanup(_restore)
+        self.disc_mod = disc_mod
+
+        class _Creds:
+            def to_json(self):
+                return '{"token": "tok"}'
+        real_flow = ourcal.run_oauth_flow
+        ourcal.run_oauth_flow = lambda flow: _Creds()
+        self.addCleanup(lambda: setattr(ourcal, "run_oauth_flow", real_flow))
+
+    def _serving(self, primary_email):
+        class _Cals:
+            def list(self):
+                return self
+
+            def execute(self):
+                return {"items": [{"id": primary_email, "primary": True}]}
+
+        class _Svc:
+            def calendarList(self):
+                return _Cals()
+        self.disc_mod.build = lambda *a, **kw: _Svc()
+
+    def test_a_mismatched_account_is_refused_and_writes_no_token(self):
+        self._serving("someone.else@example.com")
+        with self.assertRaises(RuntimeError) as cm:
+            ourcal._run_signin("One", "one@example.com")
+        self.assertIn("someone.else@example.com", str(cm.exception))
+        self.assertIn("one@example.com", str(cm.exception))
+        self.assertFalse(os.path.exists(ourcal.token_path("One")))
+
+    def test_a_matching_account_writes_the_token(self):
+        self._serving("one@example.com")
+        ourcal._run_signin("One", "one@example.com")
+        self.assertTrue(os.path.exists(ourcal.token_path("One")))
 
 
 if __name__ == "__main__":
