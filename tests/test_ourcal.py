@@ -2250,6 +2250,23 @@ class TestBundleRejection(unittest.TestCase):
             ourcal.open_bundle("ourcal1.", "pw")
         self.assertIn("truncated", str(cm.exception))
 
+    def test_a_non_dict_files_payload_is_reported_as_corrupt(self):
+        # A frame with a genuinely correct MAC (built with make_bundle, the
+        # module's own helper, so the HMAC check upstream of this passes)
+        # whose *decrypted* payload has the wrong shape. Every other
+        # corruption test is caught by the HMAC check first; this is the
+        # only way to reach the value-shape check beyond it.
+        b = ourcal.make_bundle(["not", "a", "dict"], "pw")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(b, "pw")
+        self.assertIn("The bundle is corrupt.", str(cm.exception))
+
+    def test_a_non_string_value_is_reported_as_corrupt(self):
+        b = ourcal.make_bundle({"credentials.json": 123}, "pw")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(b, "pw")
+        self.assertIn("The bundle is corrupt.", str(cm.exception))
+
 
 class TestBundleWireFormat(unittest.TestCase):
     """A known-answer test, so the format cannot drift silently.
@@ -2335,16 +2352,22 @@ class TestWriteUserFiles(_TmpData, unittest.TestCase):
 
     def test_a_bad_name_writes_nothing_at_all(self):
         # All-or-nothing: validate everything before writing anything, so a
-        # rejected bundle cannot leave a half-configured device.
+        # rejected bundle cannot leave a half-configured device. The bad key
+        # must sort *after* every good filename (token_zz/x.json, not
+        # ../evil.json) — otherwise a wrong implementation that validated and
+        # wrote one file at a time would still pass this test by chance.
         tmp = self._tmp_data()
         payload = dict(self.GOOD)
-        payload["../evil.json"] = "{}"
+        payload["token_zz/x.json"] = "{}"
         with self.assertRaises(ourcal.BundleError) as cm:
             ourcal.write_user_files(payload)
         self.assertIn("unexpected file", str(cm.exception))
         self.assertEqual(os.listdir(tmp), [])
 
     def test_invalid_accounts_json_writes_nothing_at_all(self):
+        # Ordering weakness, known and structural: nothing whitelisted sorts
+        # before "accounts.json", so this test cannot prove validate-before-
+        # write the way test_a_bad_name_writes_nothing_at_all does above.
         tmp = self._tmp_data()
         payload = dict(self.GOOD)
         payload["accounts.json"] = '[{"label": "", "email": "nope"}]'
