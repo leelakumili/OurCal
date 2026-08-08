@@ -3020,5 +3020,49 @@ class TestSessionToken(_TmpData, unittest.TestCase):
             self.assertEqual(status, 200, path)
 
 
+class TestBundledCredentials(_TmpData, unittest.TestCase):
+    """The APK ships an OAuth client so a fresh install can sign in with
+    no computer. A pasted client must still win, so bring-your-own keeps
+    working for anyone who prefers their own Google Cloud project."""
+
+    def test_none_when_nothing_is_bundled(self):
+        self._tmp_data()
+        self.assertIsNone(ourcal.bundled_credentials())
+
+    def test_returns_the_bundled_client_when_present(self):
+        self._tmp_data()
+        real = ourcal.bundled_credentials
+        ourcal.bundled_credentials = lambda: '{"installed": {"client_id": "B"}}'
+        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
+        self.assertIn("B", ourcal.bundled_credentials())
+
+    def test_a_pasted_client_wins_over_the_bundled_one(self):
+        tmp = self._tmp_data()
+        with open(os.path.join(tmp, "credentials.json"), "w",
+                  encoding="utf-8") as f:
+            f.write('{"installed": {"client_id": "PASTED"}}')
+        real = ourcal.bundled_credentials
+        ourcal.bundled_credentials = lambda: '{"installed": {"client_id": "BUNDLED"}}'
+        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
+        self.assertIn("PASTED", ourcal.client_config_text())
+        self.assertNotIn("BUNDLED", ourcal.client_config_text())
+
+    def test_falls_back_to_the_bundled_client(self):
+        self._tmp_data()          # nothing pasted
+        real = ourcal.bundled_credentials
+        ourcal.bundled_credentials = lambda: '{"installed": {"client_id": "BUNDLED"}}'
+        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
+        self.assertIn("BUNDLED", ourcal.client_config_text())
+
+    def test_raises_the_existing_message_when_there_is_no_client_at_all(self):
+        self._tmp_data()
+        real = ourcal.bundled_credentials
+        ourcal.bundled_credentials = lambda: None
+        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
+        with self.assertRaises(FileNotFoundError) as cm:
+            ourcal.client_config_text()
+        self.assertIn("credentials.json is missing", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

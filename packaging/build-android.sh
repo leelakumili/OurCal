@@ -26,6 +26,19 @@ PYPROJ_V=$(python3 -c "import re;print(re.search(r'^version = \"(.*)\"', open('$
 # Copy, never fork: the phone must run the same ourcal.py as the Mac.
 cp "$ROOT/ourcal.py" "$ANDROID/src/ourcal/core.py"
 
+# The OAuth client ships inside the APK so a fresh install can sign in with
+# no computer. credentials.json is git-ignored and stays that way — it comes
+# from the working tree locally, and from a secret in CI. Absent, the build
+# still succeeds and produces a paste-only APK.
+if [ -f "$ROOT/credentials.json" ]; then
+  mkdir -p "$ANDROID/src/ourcal/resources"
+  cp "$ROOT/credentials.json" "$ANDROID/src/ourcal/resources/bundled_credentials.json"
+  echo "bundling the OAuth client from $ROOT/credentials.json"
+else
+  rm -f "$ANDROID/src/ourcal/resources/bundled_credentials.json"
+  echo "no credentials.json — building a paste-only APK"
+fi
+
 # ── build interpreter ───────────────────────────────────────────────────
 PY=""
 for c in python3.12 python3.11 python3.10; do

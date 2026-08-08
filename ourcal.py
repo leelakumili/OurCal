@@ -793,17 +793,13 @@ def creds_for(label, email):
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     else:
-        cred_file = user_path("credentials.json")
-        if not os.path.exists(cred_file):
-            raise FileNotFoundError(
-                f"credentials.json is missing from {data_dir()} — "
-                "complete Steps 1-4 of SETUP_GUIDE.md")
         # Name the account before the browser opens: the prompts are identical
         # otherwise, and picking the wrong one silently mislabels its events.
         print(f"\nOurCal: sign in as {email}   (account “{label}”)\n"
               f"        Pick this exact account in the browser window.\n",
               flush=True)
-        flow = InstalledAppFlow.from_client_secrets_file(cred_file, SCOPES)
+        flow = InstalledAppFlow.from_client_config(
+            json.loads(client_config_text()), SCOPES)
         creds = run_oauth_flow(flow)
     # Explicit encoding, not the platform default: this file crosses Mac and
     # Android like every other user file, so it must not depend on either
@@ -1257,6 +1253,55 @@ def setup_status():
         "signedIn": [a["label"] for a in ACCOUNTS
                      if os.path.exists(token_path(a["label"]))],
     }
+
+
+BUNDLED_CLIENT = "resources/bundled_credentials.json"
+
+
+def bundled_credentials():
+    """The OAuth client shipped inside the app, or None.
+
+    credentials.json is git-ignored and must stay that way, so it reaches
+    the APK from outside the repo — build-android.sh copies it in, and CI
+    writes it from a secret. An APK built without one still works; it is
+    simply paste-only, the same way build-app.sh degrades without a
+    signing identity.
+
+    pkgutil.get_data is tried first because it works against Chaquopy's
+    loader, which a plain path does not always reach; tz() relies on the
+    same mechanism for tzdata.
+    """
+    try:
+        import pkgutil
+        raw = pkgutil.get_data(__package__ or "ourcal", BUNDLED_CLIENT)
+        if raw:
+            return raw.decode("utf-8")
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(APP_DIR, BUNDLED_CLIENT), encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def client_config_text():
+    """The OAuth client this install should use.
+
+    A pasted credentials.json always wins over the bundled one, so anyone
+    who prefers their own Google Cloud project keeps working exactly as
+    before — the shipped client is a fallback, never an override.
+    """
+    path = user_path("credentials.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    bundled = bundled_credentials()
+    if bundled:
+        return bundled
+    raise FileNotFoundError(
+        f"credentials.json is missing from {data_dir()} — "
+        "complete Steps 1-4 of SETUP_GUIDE.md")
 
 
 SETUP_PAGE = r"""<!doctype html>
