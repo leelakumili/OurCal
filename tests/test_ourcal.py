@@ -2885,8 +2885,9 @@ class TestSetupRoutes(_TmpData, unittest.TestCase):
         # not specific paths or counts that would depend on that real state.
         _, body = self._get("/api/status")
         s = json.loads(body)
-        self.assertEqual(sorted(s), ["accounts", "accountsFromFile", "android",
-                                     "bridge", "credentialsSource", "dataDir",
+        self.assertEqual(sorted(s), ["accountLabels", "accounts",
+                                     "accountsFromFile", "android", "bridge",
+                                     "credentialsSource", "dataDir",
                                      "hasCredentials", "signedIn"])
         self.assertIsInstance(s["dataDir"], str)
         self.assertIsInstance(s["android"], bool)
@@ -2895,6 +2896,7 @@ class TestSetupRoutes(_TmpData, unittest.TestCase):
         self.assertIn(s["credentialsSource"], (None, "pasted", "bundled"))
         self.assertIsInstance(s["accounts"], int)
         self.assertIsInstance(s["accountsFromFile"], bool)
+        self.assertIsInstance(s["accountLabels"], list)
         self.assertIsInstance(s["signedIn"], list)
 
     def test_import_reports_a_bad_bundle_without_a_500(self):
@@ -3114,6 +3116,65 @@ class TestBundledCredentials(_TmpData, unittest.TestCase):
         with self.assertRaises(FileNotFoundError) as cm:
             ourcal.client_config_text()
         self.assertIn("credentials.json is missing", str(cm.exception))
+
+
+class TestAccountsEditor(_TmpData, unittest.TestCase):
+    """accounts.json is a text file you edit by hand. On a phone you
+    cannot, so a downloader could never name an account to sign in to."""
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+        ourcal.ACCOUNTS = [{"label": "One", "email": "one@example.com"}]
+        with open(os.path.join(self.tmp, "accounts.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(ourcal.ACCOUNTS, f)
+
+    def test_add_appends_and_reloads(self):
+        r = ourcal.add_account("Two", "two@example.com")
+        self.assertTrue(r["ok"])
+        self.assertEqual([a["label"] for a in ourcal.ACCOUNTS], ["One", "Two"])
+
+    def test_add_rejects_a_blank_label(self):
+        r = ourcal.add_account("   ", "two@example.com")
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(ourcal.ACCOUNTS), 1)
+
+    def test_add_rejects_a_bad_address(self):
+        r = ourcal.add_account("Two", "not-an-address")
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(ourcal.ACCOUNTS), 1)
+
+    def test_add_rejects_a_label_that_collides_after_slugging(self):
+        # "one!" slugs to "one", which would share One's token file.
+        r = ourcal.add_account("one!", "two@example.com")
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(ourcal.ACCOUNTS), 1)
+
+    def test_remove_deletes_the_account_and_its_token(self):
+        ourcal.add_account("Two", "two@example.com")
+        tok = ourcal.token_path("Two")
+        with open(tok, "w", encoding="utf-8") as f:
+            f.write("{}")
+        r = ourcal.remove_account("Two")
+        self.assertTrue(r["ok"])
+        self.assertEqual([a["label"] for a in ourcal.ACCOUNTS], ["One"])
+        self.assertFalse(os.path.exists(tok))   # no live refresh token left
+
+    def test_remove_refuses_the_last_account(self):
+        # An empty list makes parse_accounts return None, load_accounts
+        # return None, and `or ACCOUNTS` restore the Personal/Work
+        # placeholders — the app would show two accounts nobody added.
+        r = ourcal.remove_account("One")
+        self.assertFalse(r["ok"])
+        self.assertIn("at least one account", r["error"])
+        self.assertEqual([a["label"] for a in ourcal.ACCOUNTS], ["One"])
+
+    def test_remove_an_unknown_label_is_refused(self):
+        r = ourcal.remove_account("Nope")
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(ourcal.ACCOUNTS), 1)
 
 
 if __name__ == "__main__":

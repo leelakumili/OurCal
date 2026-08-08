@@ -1259,6 +1259,7 @@ def setup_status():
         "credentialsSource": source,
         "accounts": len(ACCOUNTS),
         "accountsFromFile": os.path.exists(user_path("accounts.json")),
+        "accountLabels": [a["label"] for a in ACCOUNTS],
         "signedIn": [a["label"] for a in ACCOUNTS
                      if os.path.exists(token_path(a["label"]))],
     }
@@ -1362,6 +1363,17 @@ SETUP_PAGE = r"""<!doctype html>
   <div class="sub"><a href="/">&larr; back to the agenda</a></div>
 
   <div class="card">
+    <label>Accounts</label>
+    <div id="accts" style="font-size:13px;color:var(--muted)">loading&hellip;</div>
+    <label for="a-label" style="margin-top:12px">Add an account</label>
+    <input id="a-label" placeholder="Work" autocapitalize="words">
+    <input id="a-email" type="email" placeholder="you@gmail.com"
+           autocapitalize="off" autocorrect="off" style="margin-top:8px">
+    <button id="doAdd">Add</button>
+    <div id="acctMsg"></div>
+  </div>
+
+  <div class="card">
     <label>1 &middot; On your computer</label>
     <div style="font-size:13px;color:var(--muted)">
       Run <code>./ourcal.py --export | pbcopy</code>, choose a passphrase, then
@@ -1407,7 +1419,49 @@ function diag(s){
     "credentials: " + credLine + "<br>" +
     "accounts: " + s.accounts + (s.accountsFromFile ? "" : " (placeholders)") +
     "<br>signed in: " + (s.signedIn.length ? esc(s.signedIn.join(", ")) : "none");
+  renderAccounts(s);
 }
+
+function renderAccounts(s){
+  const box = document.getElementById("accts");
+  if(!s.accounts){ box.textContent = "No accounts yet."; return; }
+  box.innerHTML = (s.accountLabels || []).map(function(l){
+    const on = (s.signedIn || []).indexOf(l) >= 0;
+    return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">'
+      + '<span style="flex:1">' + esc(l) + '</span>'
+      + '<span>' + (on ? "✓ signed in" : "not signed in") + '</span>'
+      + '<button class="rm" data-label="' + esc(l) + '"'
+      + ' style="padding:4px 8px;font-size:12px">Remove</button></div>';
+  }).join("");
+  box.querySelectorAll(".rm").forEach(function(b){
+    b.onclick = function(){
+      api("/api/accounts/remove", {method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({label: b.dataset.label})})
+        .then(r=>r.json()).then(function(d){
+          document.getElementById("acctMsg").className = d.ok ? "msg good" : "msg bad";
+          document.getElementById("acctMsg").textContent = d.ok
+            ? "Removed." : (d.error || "Could not remove.");
+          refresh();
+        });
+    };
+  });
+}
+
+document.getElementById("doAdd").onclick = function(){
+  const out = document.getElementById("acctMsg");
+  api("/api/accounts", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({label: document.getElementById("a-label").value,
+                            email: document.getElementById("a-email").value})})
+    .then(r=>r.json()).then(function(d){
+      out.className = d.ok ? "msg good" : "msg bad";
+      out.textContent = d.ok ? "Added." : (d.error || "Could not add.");
+      if(d.ok){ document.getElementById("a-label").value = "";
+                document.getElementById("a-email").value = ""; }
+      refresh();
+    });
+};
 
 function refresh(){
   api("/api/status").then(r=>r.json()).then(diag)
@@ -1461,6 +1515,58 @@ def import_endpoint(payload):
                              payload.get("passphrase", ""))
     except BundleError as e:
         return {"ok": False, "error": str(e)}
+
+
+def add_account(label, email):
+    """Append an account and reload. Validation is parse_accounts'.
+
+    The whole list is validated, not just the new entry, because the rules
+    that matter are relational: a label that collides after slugging would
+    silently share another account's token file.
+    """
+    label, email = str(label or "").strip(), str(email or "").strip()
+    proposed = [dict(a) for a in ACCOUNTS] + [{"label": label, "email": email}]
+    if parse_accounts(proposed) is None:
+        return {"ok": False,
+                "error": "That account is invalid or already added."}
+    write_user_files({"accounts.json": json.dumps(proposed, indent=2)})
+    reload_accounts()
+    return {"ok": True, "accounts": len(ACCOUNTS)}
+
+
+def remove_account(label):
+    """Remove an account and delete its token file.
+
+    One action, not two: an account you removed must not leave a live
+    refresh token sitting on the device.
+    """
+    remaining = [dict(a) for a in ACCOUNTS if a["label"] != label]
+    if len(remaining) == len(ACCOUNTS):
+        return {"ok": False, "error": f"No account named {label}."}
+    if not remaining:
+        # parse_accounts rejects an empty list, so load_accounts would
+        # return None and `or ACCOUNTS` would restore the placeholders —
+        # the app would show two accounts nobody added.
+        return {"ok": False,
+                "error": "OurCal needs at least one account — "
+                         "add the replacement first."}
+    write_user_files({"accounts.json": json.dumps(remaining, indent=2)})
+    try:
+        os.remove(token_path(label))
+    except OSError:
+        pass          # never signed in, or already gone
+    reload_accounts()
+    return {"ok": True, "accounts": len(ACCOUNTS)}
+
+
+def accounts_endpoint(payload):
+    """POST /api/accounts — add an account."""
+    return add_account(payload.get("label", ""), payload.get("email", ""))
+
+
+def accounts_remove_endpoint(payload):
+    """POST /api/accounts/remove — remove one, and its token."""
+    return remove_account(payload.get("label", ""))
 
 
 # ── HTML ────────────────────────────────────────────────────────────────
@@ -2295,7 +2401,9 @@ class OurCalHandler(BaseHTTPRequestHandler):
                 self._send(403, json.dumps({"error": "forbidden"}))
                 return
             routes = {"/api/create": create_event, "/api/delete": delete_events,
-                      "/api/update": update_events, "/api/import": import_endpoint}
+                      "/api/update": update_events, "/api/import": import_endpoint,
+                      "/api/accounts": accounts_endpoint,
+                      "/api/accounts/remove": accounts_remove_endpoint}
             handler = routes.get(self.path)
             if handler is None:
                 self._send(404, json.dumps({"error": "not found"}))
