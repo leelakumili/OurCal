@@ -1643,7 +1643,7 @@ function render(){
   // problem with one fix, not N problems. Any other mix keeps the
   // per-account banners: an expired token must not hide behind "not set up".
   banner.innerHTML = (errs.length && errs.every(e=>e.setup))
-    ? `<div class="banner">⚠️ OurCal isn't set up on this device yet. <a class="setup-link" href="/setup">Set up this device</a></div>`
+    ? `<div class="banner">⚠️ OurCal isn't set up on this device yet. <a class="setup-link" href="/setup" style="color:var(--accent)">Set up this device</a></div>`
     : errs.map(e=>`<div class="banner">⚠️ Couldn't refresh <b>${esc(e.label)}</b> — ${esc(e.message)}</div>`).join("");
 
   const box=document.getElementById("agenda");

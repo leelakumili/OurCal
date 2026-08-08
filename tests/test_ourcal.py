@@ -1959,9 +1959,19 @@ class TestPageStructure(unittest.TestCase):
         self.assertIn("isn't set up on this device yet", ourcal.PAGE)
         self.assertIn("Set up this device", ourcal.PAGE)
 
-    def test_per_account_banners_survive_for_other_failures(self):
-        # One expired token must not hide behind a "not set up" message.
-        self.assertIn("Couldn't refresh", ourcal.PAGE)
+    def test_per_account_banners_are_the_fallback_branch_not_dead_code(self):
+        # "Couldn't refresh" being present proves nothing — it predates the
+        # collapse. What matters is that the per-account map is the ternary's
+        # FALSE branch, gated on every error being a setup error. A regression
+        # that hard-wired the collapse would leave the string as dead code and
+        # a mere assertIn would still pass.
+        page = ourcal.PAGE
+        cond = page.index("errs.every(e=>e.setup)")
+        collapse = page.index("isn't set up on this device yet")
+        per_account = page.index("Couldn't refresh <b>")
+        self.assertLess(cond, collapse)          # the condition gates it
+        self.assertLess(collapse, per_account)   # per-account is the : branch
+        self.assertIn(": errs.map(", page[collapse:per_account])
 
     def test_setup_stays_reachable_after_setup_succeeds(self):
         # The banner disappears once it works; re-importing after a revoked
