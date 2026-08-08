@@ -2092,6 +2092,23 @@ class TestAndroidProbe(unittest.TestCase):
         self.addCleanup(lambda: setattr(builtins, "__import__", real))
         self.assertFalse(ourcal.is_android())
 
+    def test_true_when_the_chaquopy_import_succeeds(self):
+        # The other half of the fallback: `import com.chaquo.python`
+        # succeeding, with no interpreter probe available. Nothing exercised
+        # this before — the same shape of untested True branch this whole
+        # branch exists to fix.
+        import sys
+        import types
+        added = []
+        for name in ("com", "com.chaquo", "com.chaquo.python"):
+            if name not in sys.modules:
+                sys.modules[name] = types.ModuleType(name)
+                added.append(name)
+        # Remove exactly what we added, nothing a prior/parallel test left.
+        self.addCleanup(lambda: [sys.modules.pop(n, None) for n in added])
+        self.assertFalse(hasattr(sys, "getandroidapilevel"))
+        self.assertTrue(ourcal.is_android())
+
 
 class TestAndroidDataDir(unittest.TestCase):
     """The Android branch, exercised on the desktop by faking the probe —
