@@ -1032,6 +1032,77 @@ def open_bundle(bundle, passphrase):
     return files
 
 
+_TOKEN_FILE_RE = re.compile(r"^token_[a-z0-9-]+\.json$")
+
+
+def is_user_file(name):
+    """Whether a bundle may write this name.
+
+    An exact whitelist, never sanitisation: os.path.join(data_dir(), name)
+    with a crafted name is a path traversal, and matching makes that
+    structurally impossible rather than defended against. The token pattern is
+    exactly what slug() produces.
+    """
+    return (name in ("credentials.json", "accounts.json")
+            or bool(_TOKEN_FILE_RE.match(name)))
+
+
+def reload_accounts():
+    """Re-read accounts.json into the module global.
+
+    ACCOUNTS resolves at import, so writing the file changes nothing until it
+    is re-read. get_events, _google_collect and _email_for all read the global
+    at call time, so reassignment is enough — no restart, and the placeholder
+    chips become the real accounts as soon as an import lands.
+    """
+    global ACCOUNTS
+    loaded = load_accounts(user_path("accounts.json"))
+    if loaded:
+        ACCOUNTS = loaded
+    return ACCOUNTS
+
+
+def write_user_files(files):
+    """Validate every entry, then write them all. Returns the names written.
+
+    All-or-nothing: nothing is written until everything has passed, so a bad
+    bundle cannot leave a half-configured device. The six renames are still
+    not one transaction — a disk failure part-way can leave a partial write —
+    but validate-first removes every failure mode short of that.
+    """
+    for name, body in sorted(files.items()):
+        if not is_user_file(name):
+            raise BundleError(f"Bundle contains an unexpected file: {name} — "
+                              "nothing was written.")
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            raise BundleError(f"{name} in the bundle is not valid JSON — "
+                              "nothing was written.")
+        if name == "accounts.json" and parse_accounts(parsed) is None:
+            raise BundleError("The accounts list in the bundle is invalid — "
+                              "nothing was written.")
+    d = ensure_data_dir()
+    written = []
+    for name, body in sorted(files.items()):
+        tmp = os.path.join(d, "." + name + ".tmp")
+        # Mode at creation, not afterwards: never a window in which a token
+        # file is readable by anything else on the device.
+        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.replace(tmp, os.path.join(d, name))
+        written.append(name)
+    return written
+
+
+def import_bundle(bundle, passphrase):
+    """Paste-in setup: decrypt, validate, write, reload. Raises BundleError."""
+    written = write_user_files(open_bundle(bundle, passphrase))
+    accounts = reload_accounts() if "accounts.json" in written else ACCOUNTS
+    return {"ok": True, "written": written, "accounts": len(accounts)}
+
+
 # ── HTML ────────────────────────────────────────────────────────────────
 PAGE = r"""<!doctype html>
 <html lang="en">

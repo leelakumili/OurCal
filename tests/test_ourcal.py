@@ -2122,5 +2122,142 @@ class TestBundleWireFormat(unittest.TestCase):
             {"credentials.json": '{"installed": {"client_id": "kat"}}'})
 
 
+class _TmpData:
+    """Point data_dir() at a throwaway directory.
+
+    CONTRIBUTING.md:49 — never point tests at real credentials. In a checkout
+    data_dir() is APP_DIR, the repo itself, where the developer's real
+    credentials.json, accounts.json and token files live. A test that writes
+    without redirecting would overwrite them.
+    """
+
+    def _tmp_data(self):
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real = ourcal.data_dir
+        ourcal.data_dir = lambda: tmp
+        self.addCleanup(lambda: setattr(ourcal, "data_dir", real))
+        return tmp
+
+
+class TestUserFileWhitelist(unittest.TestCase):
+    """A bundle is untrusted input. Names are matched against a whitelist,
+    never sanitised: os.path.join with a crafted name is a traversal."""
+
+    def test_accepts_the_two_config_files(self):
+        self.assertTrue(ourcal.is_user_file("credentials.json"))
+        self.assertTrue(ourcal.is_user_file("accounts.json"))
+
+    def test_accepts_slugged_token_names(self):
+        self.assertTrue(ourcal.is_user_file("token_leela.json"))
+        self.assertTrue(ourcal.is_user_file("token_leela-k.json"))
+        self.assertTrue(ourcal.is_user_file("token_leela-26033.json"))
+
+    def test_rejects_traversal(self):
+        for bad in ["../evil.json", "../../etc/passwd",
+                    "token_a/b.json", "/etc/passwd", "token_../x.json"]:
+            self.assertFalse(ourcal.is_user_file(bad), bad)
+
+    def test_rejects_names_outside_the_whitelist(self):
+        for bad in ["random.json", "TOKEN_X.json", "token_.json",
+                    "token_Leela.json", "credentials.json.bak", "", "."]:
+            self.assertFalse(ourcal.is_user_file(bad), bad)
+
+
+class TestWriteUserFiles(_TmpData, unittest.TestCase):
+    GOOD = {"credentials.json": '{"installed": {"client_id": "x"}}',
+            "accounts.json": '[{"label": "L", "email": "l@example.com"}]',
+            "token_l.json": '{"refresh_token": "s"}'}
+
+    def test_writes_every_file(self):
+        tmp = self._tmp_data()
+        self.assertEqual(ourcal.write_user_files(self.GOOD),
+                         ["accounts.json", "credentials.json", "token_l.json"])
+        for name, body in self.GOOD.items():
+            with open(os.path.join(tmp, name)) as f:
+                self.assertEqual(f.read(), body)
+
+    def test_files_are_owner_only(self):
+        import stat
+        tmp = self._tmp_data()
+        ourcal.write_user_files(self.GOOD)
+        for name in self.GOOD:
+            mode = stat.S_IMODE(os.stat(os.path.join(tmp, name)).st_mode)
+            self.assertEqual(mode, 0o600, name)
+
+    def test_a_bad_name_writes_nothing_at_all(self):
+        # All-or-nothing: validate everything before writing anything, so a
+        # rejected bundle cannot leave a half-configured device.
+        tmp = self._tmp_data()
+        payload = dict(self.GOOD)
+        payload["../evil.json"] = "{}"
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.write_user_files(payload)
+        self.assertIn("unexpected file", str(cm.exception))
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_invalid_accounts_json_writes_nothing_at_all(self):
+        tmp = self._tmp_data()
+        payload = dict(self.GOOD)
+        payload["accounts.json"] = '[{"label": "", "email": "nope"}]'
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.write_user_files(payload)
+        self.assertIn("accounts list in the bundle is invalid",
+                      str(cm.exception))
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_non_json_content_writes_nothing_at_all(self):
+        tmp = self._tmp_data()
+        payload = dict(self.GOOD)
+        payload["token_l.json"] = "not json at all"
+        with self.assertRaises(ourcal.BundleError):
+            ourcal.write_user_files(payload)
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_leaves_no_temp_files_behind(self):
+        tmp = self._tmp_data()
+        ourcal.write_user_files(self.GOOD)
+        self.assertEqual(sorted(os.listdir(tmp)), sorted(self.GOOD))
+
+
+class TestReloadAccounts(_TmpData, unittest.TestCase):
+    """ACCOUNTS resolves at import (ourcal.py:142), so writing accounts.json
+    changes nothing until it is re-read. Without this the phone keeps showing
+    the placeholder Personal/Work chips after a successful import."""
+
+    def setUp(self):
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+
+    def test_import_replaces_the_module_global(self):
+        self._tmp_data()
+        files = {"credentials.json": '{"installed": {}}',
+                 "accounts.json": json.dumps(
+                     [{"label": "Imported", "email": "i@example.com"}])}
+        bundle = ourcal.make_bundle(files, "pw")
+        result = ourcal.import_bundle(bundle, "pw")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["accounts"], 1)
+        self.assertEqual([a["label"] for a in ourcal.ACCOUNTS], ["Imported"])
+
+    def test_a_bundle_without_accounts_leaves_them_alone(self):
+        self._tmp_data()
+        before = list(ourcal.ACCOUNTS)
+        bundle = ourcal.make_bundle({"credentials.json": '{"installed": {}}'},
+                                    "pw")
+        ourcal.import_bundle(bundle, "pw")
+        self.assertEqual(ourcal.ACCOUNTS, before)
+
+    def test_a_wrong_passphrase_writes_nothing(self):
+        tmp = self._tmp_data()
+        bundle = ourcal.make_bundle({"credentials.json": '{"installed": {}}'},
+                                    "right")
+        with self.assertRaises(ourcal.BundleError):
+            ourcal.import_bundle(bundle, "wrong")
+        self.assertEqual(os.listdir(tmp), [])
+
+
 if __name__ == "__main__":
     unittest.main()
