@@ -1,4 +1,4 @@
-import copy, datetime, json, os, unittest
+import copy, datetime, json, os, time, unittest
 from zoneinfo import ZoneInfo
 os.environ.setdefault("OURCAL_DEMO", "1")  # keep imports side-effect free / no google
 import ourcal
@@ -3175,6 +3175,63 @@ class TestAccountsEditor(_TmpData, unittest.TestCase):
         r = ourcal.remove_account("Nope")
         self.assertFalse(r["ok"])
         self.assertEqual(len(ourcal.ACCOUNTS), 1)
+
+
+class TestSignInEndpoint(_TmpData, unittest.TestCase):
+    """Signing in used to happen inside the agenda request and block it
+    for up to 300s per account. On a phone that is a frozen screen."""
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+        ourcal.ACCOUNTS = [{"label": "One", "email": "one@example.com"}]
+        ourcal._SIGNIN.update({"label": None, "state": "idle", "message": ""})
+        self.addCleanup(lambda: ourcal._SIGNIN.update(
+            {"label": None, "state": "idle", "message": ""}))
+
+    def _fake_flow(self, result=None, boom=None):
+        def run(label, email):
+            if boom:
+                raise boom
+            with open(ourcal.token_path(label), "w", encoding="utf-8") as f:
+                f.write(result or "{}")
+        real = ourcal._run_signin
+        ourcal._run_signin = run
+        self.addCleanup(lambda: setattr(ourcal, "_run_signin", real))
+
+    def test_starts_and_reaches_done(self):
+        self._fake_flow()
+        self.assertTrue(ourcal.start_signin("One")["ok"])
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "done")
+        self.assertTrue(os.path.exists(ourcal.token_path("One")))
+
+    def test_a_failure_reaches_error_with_its_message(self):
+        self._fake_flow(boom=RuntimeError("no network"))
+        ourcal.start_signin("One")
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "error")
+        self.assertIn("no network", s["message"])
+
+    def test_a_second_signin_while_one_runs_is_refused(self):
+        ourcal._SIGNIN.update({"label": "One", "state": "waiting"})
+        r = ourcal.start_signin("One")
+        self.assertFalse(r["ok"])
+        self.assertIn("already running", r["error"])
+
+    def test_an_unknown_label_is_refused(self):
+        r = ourcal.start_signin("Nope")
+        self.assertFalse(r["ok"])
+        self.assertEqual(ourcal.signin_status()["state"], "idle")
 
 
 if __name__ == "__main__":

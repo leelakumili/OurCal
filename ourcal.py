@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1431,7 +1432,10 @@ function renderAccounts(s){
       + '<span style="flex:1">' + esc(l) + '</span>'
       + '<span>' + (on ? "✓ signed in" : "not signed in") + '</span>'
       + '<button class="rm" data-label="' + esc(l) + '"'
-      + ' style="padding:4px 8px;font-size:12px">Remove</button></div>';
+      + ' style="padding:4px 8px;font-size:12px">Remove</button>'
+      + (on ? "" : '<button class="si" data-label="' + esc(l) + '"'
+        + ' style="padding:4px 8px;font-size:12px">Sign in</button>')
+      + '</div>';
   }).join("");
   box.querySelectorAll(".rm").forEach(function(b){
     b.onclick = function(){
@@ -1443,6 +1447,30 @@ function renderAccounts(s){
           document.getElementById("acctMsg").textContent = d.ok
             ? "Removed." : (d.error || "Could not remove.");
           refresh();
+        });
+    };
+  });
+  box.querySelectorAll(".si").forEach(function(b){
+    b.onclick = function(){
+      const out = document.getElementById("acctMsg");
+      out.className = "msg";
+      out.textContent = "Opening Google… finish there, then come back "
+                      + "to this app.";
+      api("/api/signin", {method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({label: b.dataset.label})})
+        .then(r=>r.json()).then(function(d){
+          if(!d.ok){ out.className = "msg bad"; out.textContent = d.error; return; }
+          const poll = setInterval(function(){
+            api("/api/signin/status").then(r=>r.json()).then(function(s){
+              if(s.state === "waiting") return;
+              clearInterval(poll);
+              out.className = s.state === "done" ? "msg good" : "msg bad";
+              out.textContent = s.state === "done"
+                ? "Signed in." : (s.message || "Sign-in failed.");
+              refresh();
+            });
+          }, 1500);
         });
     };
   });
@@ -1567,6 +1595,59 @@ def accounts_endpoint(payload):
 def accounts_remove_endpoint(payload):
     """POST /api/accounts/remove — remove one, and its token."""
     return remove_account(payload.get("label", ""))
+
+
+# One sign-in at a time: run_local_server binds a port, and the user can
+# only be in one browser flow.
+_SIGNIN = {"label": None, "state": "idle", "message": ""}
+_SIGNIN_LOCK = threading.Lock()
+
+
+def _run_signin(label, email):
+    """Complete one OAuth flow and write its token. Blocking; own thread.
+
+    Split out so tests can replace it without faking Google. The Android
+    specifics — the browser Intent and waiting for DNS to come back after
+    the trip to Chrome — already live in run_oauth_flow.
+    """
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    flow = InstalledAppFlow.from_client_config(
+        json.loads(client_config_text()), SCOPES)
+    creds = run_oauth_flow(flow)
+    with open(token_path(label), "w", encoding="utf-8") as f:
+        f.write(creds.to_json())
+
+
+def start_signin(label):
+    """Begin a sign-in on a background thread and return immediately."""
+    import threading
+    email = _email_for(label)
+    if email is None:
+        return {"ok": False, "error": f"No account named {label}."}
+    with _SIGNIN_LOCK:
+        if _SIGNIN["state"] == "waiting":
+            return {"ok": False,
+                    "error": "Another sign-in is already running — "
+                             "finish it first."}
+        _SIGNIN.update({"label": label, "state": "waiting", "message": ""})
+
+    def work():
+        try:
+            _run_signin(label, email)
+            _SIGNIN.update({"state": "done", "message": ""})
+        except Exception as e:
+            _SIGNIN.update({"state": "error", "message": str(e)})
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True}
+
+
+def signin_status():
+    return dict(_SIGNIN)
+
+
+def signin_endpoint(payload):
+    return start_signin(payload.get("label", ""))
 
 
 # ── HTML ────────────────────────────────────────────────────────────────
@@ -2387,6 +2468,8 @@ class OurCalHandler(BaseHTTPRequestHandler):
                            "text/html; charset=utf-8")
             elif self.path == "/api/status":
                 self._send(200, json.dumps(setup_status()))
+            elif self.path == "/api/signin/status":
+                self._send(200, json.dumps(signin_status()))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception as e:
@@ -2403,7 +2486,8 @@ class OurCalHandler(BaseHTTPRequestHandler):
             routes = {"/api/create": create_event, "/api/delete": delete_events,
                       "/api/update": update_events, "/api/import": import_endpoint,
                       "/api/accounts": accounts_endpoint,
-                      "/api/accounts/remove": accounts_remove_endpoint}
+                      "/api/accounts/remove": accounts_remove_endpoint,
+                      "/api/signin": signin_endpoint}
             handler = routes.get(self.path)
             if handler is None:
                 self._send(404, json.dumps({"error": "not found"}))
