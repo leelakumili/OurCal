@@ -1237,17 +1237,26 @@ def setup_status():
     `android` — so the footer can tell "android branch live" apart from
     "android branch live but the Java bridge is unavailable", the exact
     diagnosis someone will need if data_dir() ever has to fall back.
+
+    `hasCredentials` means a client is available from *somewhere* — pasted
+    or bundled — since sign-in works either way; `credentialsSource` tells
+    the footer which one, so a fresh install running on the bundled client
+    is never misreported as "credentials.json: missing" while sign-in is
+    working fine.
     """
     bridge = True
     try:
         android_data_dir()
     except Exception:
         bridge = False
+    pasted = os.path.exists(user_path("credentials.json"))
+    source = "pasted" if pasted else ("bundled" if bundled_credentials() else None)
     return {
         "dataDir": data_dir(),
         "android": is_android(),
         "bridge": bridge,
-        "hasCredentials": os.path.exists(user_path("credentials.json")),
+        "hasCredentials": source is not None,
+        "credentialsSource": source,
         "accounts": len(ACCOUNTS),
         "accountsFromFile": os.path.exists(user_path("accounts.json")),
         "signedIn": [a["label"] for a in ACCOUNTS
@@ -1281,7 +1290,9 @@ def bundled_credentials():
     try:
         with open(os.path.join(APP_DIR, BUNDLED_CLIENT), encoding="utf-8") as f:
             return f.read()
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError: a corrupt bundled file must
+        # fall through to "no client available", not a raw traceback.
         return None
 
 
@@ -1388,10 +1399,12 @@ function diag(s){
     bridgeLine = "<br><b>android branch live, but the Java bridge is "
       + "unavailable</b> — falling back, data dir may be wrong";
   }
+  var credLine = s.credentialsSource === "bundled" ? "bundled with the app"
+    : s.credentialsSource === "pasted" ? "pasted in" : "missing";
   document.getElementById("diag").innerHTML =
     "data dir: " + esc(s.dataDir) + "<br>" +
     "android branch: " + (s.android ? "live" : "not active") + bridgeLine + "<br>" +
-    "credentials.json: " + (s.hasCredentials ? "present" : "missing") + "<br>" +
+    "credentials: " + credLine + "<br>" +
     "accounts: " + s.accounts + (s.accountsFromFile ? "" : " (placeholders)") +
     "<br>signed in: " + (s.signedIn.length ? esc(s.signedIn.join(", ")) : "none");
 }

@@ -2702,6 +2702,7 @@ class TestSetupStatus(_TmpData, unittest.TestCase):
         self.assertEqual(s["dataDir"], tmp)
         self.assertFalse(s["android"])
         self.assertFalse(s["hasCredentials"])
+        self.assertIsNone(s["credentialsSource"])
         self.assertFalse(s["accountsFromFile"])
         self.assertEqual(s["signedIn"], [])
 
@@ -2714,9 +2715,22 @@ class TestSetupStatus(_TmpData, unittest.TestCase):
                 f.write("{}")
         s = ourcal.setup_status()
         self.assertTrue(s["hasCredentials"])
+        self.assertEqual(s["credentialsSource"], "pasted")
         self.assertTrue(s["accountsFromFile"])
         self.assertEqual(s["accounts"], 2)
         self.assertEqual(s["signedIn"], ["Leela"])   # Leela K has no token
+
+    def test_reports_bundled_when_nothing_is_pasted(self):
+        # A fresh install running purely on the shipped client must not be
+        # misreported as "credentials.json: missing" — that would send
+        # someone debugging a working install in the wrong direction.
+        self._tmp_data()
+        real = ourcal.bundled_credentials
+        ourcal.bundled_credentials = lambda: '{"installed": {"client_id": "B"}}'
+        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
+        s = ourcal.setup_status()
+        self.assertTrue(s["hasCredentials"])
+        self.assertEqual(s["credentialsSource"], "bundled")
 
     def test_reports_the_android_branch(self):
         self._tmp_data()
@@ -2872,12 +2886,13 @@ class TestSetupRoutes(_TmpData, unittest.TestCase):
         _, body = self._get("/api/status")
         s = json.loads(body)
         self.assertEqual(sorted(s), ["accounts", "accountsFromFile", "android",
-                                     "bridge", "dataDir", "hasCredentials",
-                                     "signedIn"])
+                                     "bridge", "credentialsSource", "dataDir",
+                                     "hasCredentials", "signedIn"])
         self.assertIsInstance(s["dataDir"], str)
         self.assertIsInstance(s["android"], bool)
         self.assertIsInstance(s["bridge"], bool)
         self.assertIsInstance(s["hasCredentials"], bool)
+        self.assertIn(s["credentialsSource"], (None, "pasted", "bundled"))
         self.assertIsInstance(s["accounts"], int)
         self.assertIsInstance(s["accountsFromFile"], bool)
         self.assertIsInstance(s["signedIn"], list)
@@ -3029,12 +3044,49 @@ class TestBundledCredentials(_TmpData, unittest.TestCase):
         self._tmp_data()
         self.assertIsNone(ourcal.bundled_credentials())
 
-    def test_returns_the_bundled_client_when_present(self):
-        self._tmp_data()
-        real = ourcal.bundled_credentials
-        ourcal.bundled_credentials = lambda: '{"installed": {"client_id": "B"}}'
-        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
-        self.assertIn("B", ourcal.bundled_credentials())
+    def test_reads_a_bundled_client_from_beside_the_module(self):
+        # The desktop path: pkgutil finds nothing for a top-level module, so
+        # the plain-path fallback is what answers.
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "resources"))
+        with open(os.path.join(tmp, ourcal.BUNDLED_CLIENT), "w",
+                  encoding="utf-8") as f:
+            f.write('{"installed": {"client_id": "FROM-DISK"}}')
+        real = ourcal.APP_DIR
+        ourcal.APP_DIR = tmp
+        self.addCleanup(lambda: setattr(ourcal, "APP_DIR", real))
+        self.assertIn("FROM-DISK", ourcal.bundled_credentials())
+
+    def test_reads_a_bundled_client_through_the_package_loader(self):
+        # The Android path: Chaquopy serves app files through its loader, so
+        # pkgutil.get_data answers and the plain path is never reached. tz()
+        # relies on the same mechanism for tzdata.
+        import pkgutil
+        real = pkgutil.get_data
+        pkgutil.get_data = lambda pkg, res: (
+            b'{"installed": {"client_id": "FROM-LOADER"}}'
+            if res == ourcal.BUNDLED_CLIENT else None)
+        self.addCleanup(lambda: setattr(pkgutil, "get_data", real))
+        self.assertIn("FROM-LOADER", ourcal.bundled_credentials())
+
+    def test_a_corrupt_bundled_file_is_treated_as_absent(self):
+        # UnicodeDecodeError is a ValueError, not an OSError — a corrupt
+        # bundled file must fall through to None, not a raw traceback that
+        # would surface through client_config_text() and creds_for().
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "resources"))
+        with open(os.path.join(tmp, ourcal.BUNDLED_CLIENT), "wb") as f:
+            f.write(b"\xff\xfe\x00bad-utf8")
+        real = ourcal.APP_DIR
+        ourcal.APP_DIR = tmp
+        self.addCleanup(lambda: setattr(ourcal, "APP_DIR", real))
+        self.assertIsNone(ourcal.bundled_credentials())
 
     def test_a_pasted_client_wins_over_the_bundled_one(self):
         tmp = self._tmp_data()
