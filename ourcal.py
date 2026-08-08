@@ -65,9 +65,21 @@ def data_dir():
     from a source checkout keeps using the checkout — that is where the setup
     guide tells people to drop credentials.json, and it keeps a clone
     self-contained.
+
+    android_data_dir() imports the Java bridge, and on the device that first
+    reported the platform-detection bug that import demonstrably failed for
+    reasons still unknown. Letting it raise here would turn that into a crash
+    at module import — ensure_data_dir() runs at import time — so the app
+    would never start and nobody would ever see the diagnostics footer built
+    to make failures like this visible. Falling through instead trades "wrong
+    directory" for "wrong directory, degraded" rather than "does not launch";
+    setup_status()'s `bridge` key reports the failure so it stays visible.
     """
     if is_android():
-        return android_data_dir()
+        try:
+            return android_data_dir()
+        except Exception:
+            pass    # bridge unavailable — fall through, and say so in setup_status
     return SUPPORT_DIR if is_bundled() else APP_DIR
 
 
@@ -1169,11 +1181,21 @@ def setup_status():
 
     `dataDir` and `android` are here because their being wrong is exactly the
     failure that went unnoticed for a month: nothing on the phone ever
-    reported which directory it had resolved.
+    reported which directory it had resolved. `bridge` reports whether
+    android_data_dir() is actually callable right now, independent of
+    `android` — so the footer can tell "android branch live" apart from
+    "android branch live but the Java bridge is unavailable", the exact
+    diagnosis someone will need if data_dir() ever has to fall back.
     """
+    bridge = True
+    try:
+        android_data_dir()
+    except Exception:
+        bridge = False
     return {
         "dataDir": data_dir(),
         "android": is_android(),
+        "bridge": bridge,
         "hasCredentials": os.path.exists(user_path("credentials.json")),
         "accounts": len(ACCOUNTS),
         "accountsFromFile": os.path.exists(user_path("accounts.json")),
@@ -1254,9 +1276,14 @@ function esc(s){return String(s).replace(/[&<>"]/g,c=>(
   {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));}
 
 function diag(s){
+  var bridgeLine = "";
+  if(s.android && !s.bridge){
+    bridgeLine = "<br><b>android branch live, but the Java bridge is "
+      + "unavailable</b> — falling back, data dir may be wrong";
+  }
   document.getElementById("diag").innerHTML =
     "data dir: " + esc(s.dataDir) + "<br>" +
-    "android branch: " + (s.android ? "live" : "not active") + "<br>" +
+    "android branch: " + (s.android ? "live" : "not active") + bridgeLine + "<br>" +
     "credentials.json: " + (s.hasCredentials ? "present" : "missing") + "<br>" +
     "accounts: " + s.accounts + (s.accountsFromFile ? "" : " (placeholders)") +
     "<br>signed in: " + (s.signedIn.length ? esc(s.signedIn.join(", ")) : "none");

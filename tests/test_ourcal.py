@@ -2122,6 +2122,30 @@ class TestAndroidDataDir(unittest.TestCase):
         self.assertEqual(ourcal.user_path("credentials.json"),
                          "/android/files/credentials.json")
 
+    def test_data_dir_falls_back_when_the_bridge_import_fails(self):
+        # The bridge import demonstrably failed on the device that reported
+        # the original bug, for reasons still unknown. If it fails again,
+        # data_dir() must degrade (fall through to the desktop rule) rather
+        # than raise — an uncaught raise here happens at module import time
+        # (ensure_data_dir() runs at import), which would crash app startup
+        # entirely instead of just resolving the wrong directory.
+        real_a, real_d = ourcal.is_android, ourcal.android_data_dir
+        ourcal.is_android = lambda: True
+
+        def boom():
+            raise RuntimeError("bridge not ready")
+
+        ourcal.android_data_dir = boom
+        self.addCleanup(lambda: setattr(ourcal, "is_android", real_a))
+        self.addCleanup(lambda: setattr(ourcal, "android_data_dir", real_d))
+        self._bundled(False)
+        self.assertEqual(ourcal.data_dir(), ourcal.APP_DIR)
+
+    def _bundled(self, yes):
+        real = ourcal.is_bundled
+        ourcal.is_bundled = lambda: yes
+        self.addCleanup(lambda: setattr(ourcal, "is_bundled", real))
+
 
 class TestBundleRoundTrip(unittest.TestCase):
     """The bundle crosses an untrusted channel — it carries live refresh
@@ -2487,6 +2511,34 @@ class TestSetupStatus(_TmpData, unittest.TestCase):
         self.addCleanup(lambda: setattr(ourcal, "is_android", real))
         self.assertTrue(ourcal.setup_status()["android"])
 
+    def test_bridge_is_false_off_android(self):
+        # The real android_data_dir() imports com.chaquo.python, which does
+        # not exist here — bridge must report that without raising.
+        self._tmp_data()
+        self.assertFalse(ourcal.setup_status()["bridge"])
+
+    def test_bridge_reflects_whether_android_data_dir_actually_works(self):
+        # android and bridge are independent: this is the "android branch
+        # live but bridge unavailable" combination the footer must be able
+        # to show, distinct from a plain desktop where android is False too.
+        self._tmp_data()
+        real_a, real_d = ourcal.is_android, ourcal.android_data_dir
+        ourcal.is_android = lambda: True
+        ourcal.android_data_dir = lambda: (_ for _ in ()).throw(
+            RuntimeError("bridge not ready"))
+        self.addCleanup(lambda: setattr(ourcal, "is_android", real_a))
+        self.addCleanup(lambda: setattr(ourcal, "android_data_dir", real_d))
+        s = ourcal.setup_status()
+        self.assertTrue(s["android"])
+        self.assertFalse(s["bridge"])
+
+    def test_bridge_is_true_when_android_data_dir_succeeds(self):
+        self._tmp_data()
+        real_d = ourcal.android_data_dir
+        ourcal.android_data_dir = lambda: "/android/files"
+        self.addCleanup(lambda: setattr(ourcal, "android_data_dir", real_d))
+        self.assertTrue(ourcal.setup_status()["bridge"])
+
 
 class TestSetupErrorFlag(unittest.TestCase):
     """The banner must not string-match error text to decide whether to offer
@@ -2585,7 +2637,8 @@ class TestSetupRoutes(unittest.TestCase):
         _, body = self._get("/api/status")
         s = json.loads(body)
         self.assertEqual(sorted(s), ["accounts", "accountsFromFile", "android",
-                                     "dataDir", "hasCredentials", "signedIn"])
+                                     "bridge", "dataDir", "hasCredentials",
+                                     "signedIn"])
 
     def test_import_reports_a_bad_bundle_without_a_500(self):
         status, body = self._post("/api/import",
@@ -2635,6 +2688,13 @@ class TestSetupPageStructure(unittest.TestCase):
         # The diagnostic that would have made the seam bug obvious.
         self.assertIn("dataDir", ourcal.SETUP_PAGE)
         self.assertIn("android", ourcal.SETUP_PAGE)
+
+    def test_page_distinguishes_a_dead_bridge_from_an_inactive_branch(self):
+        # "android branch live" and "android branch live but the bridge is
+        # unavailable" are different diagnoses — the footer must be able to
+        # tell them apart, not just report the android flag.
+        self.assertIn("s.bridge", ourcal.SETUP_PAGE)
+        self.assertIn("bridge is", ourcal.SETUP_PAGE.lower())
 
 
 if __name__ == "__main__":
