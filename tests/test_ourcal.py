@@ -2345,5 +2345,78 @@ class TestExportCli(_TmpData, unittest.TestCase):
                          {"credentials.json": '{"installed": {}}'})
 
 
+class TestSetupStatus(_TmpData, unittest.TestCase):
+    """The diagnostics footer. A month of Android breakage was invisible
+    because nothing on the phone ever reported which directory it resolved."""
+
+    def setUp(self):
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+
+    def test_reports_an_empty_device(self):
+        tmp = self._tmp_data()
+        s = ourcal.setup_status()
+        self.assertEqual(s["dataDir"], tmp)
+        self.assertFalse(s["android"])
+        self.assertFalse(s["hasCredentials"])
+        self.assertFalse(s["accountsFromFile"])
+        self.assertEqual(s["signedIn"], [])
+
+    def test_reports_credentials_and_sign_ins(self):
+        tmp = self._tmp_data()
+        ourcal.ACCOUNTS = [{"label": "Leela", "email": "l@example.com"},
+                           {"label": "Leela K", "email": "lk@example.com"}]
+        for name in ["credentials.json", "accounts.json", "token_leela.json"]:
+            with open(os.path.join(tmp, name), "w") as f:
+                f.write("{}")
+        s = ourcal.setup_status()
+        self.assertTrue(s["hasCredentials"])
+        self.assertTrue(s["accountsFromFile"])
+        self.assertEqual(s["accounts"], 2)
+        self.assertEqual(s["signedIn"], ["Leela"])   # Leela K has no token
+
+    def test_reports_the_android_branch(self):
+        self._tmp_data()
+        real = ourcal.is_android
+        ourcal.is_android = lambda: True
+        self.addCleanup(lambda: setattr(ourcal, "is_android", real))
+        self.assertTrue(ourcal.setup_status()["android"])
+
+
+class TestSetupErrorFlag(unittest.TestCase):
+    """The banner must not string-match error text to decide whether to offer
+    setup — a missing credentials.json is a different thing from a dead
+    token, and only the first one has a way out on the phone."""
+
+    def _events_with(self, exc):
+        real = ourcal.service_for
+        ourcal.service_for = lambda label, email: (_ for _ in ()).throw(exc)
+        self.addCleanup(lambda: setattr(ourcal, "service_for", real))
+        return ourcal.list_account_events("L", "l@example.com", "a", "b")
+
+    def test_missing_credentials_is_flagged_as_setup(self):
+        _, err = self._events_with(FileNotFoundError("credentials.json is missing"))
+        self.assertTrue(err["setup"])
+        self.assertIn("credentials.json is missing", err["message"])
+
+    def test_any_other_failure_is_not_flagged_as_setup(self):
+        _, err = self._events_with(RuntimeError("token revoked"))
+        self.assertFalse(err["setup"])
+        self.assertIn("re-auth", err["message"])
+
+    def test_collect_carries_the_flag_through_with_the_label(self):
+        real_accounts = ourcal.ACCOUNTS
+        ourcal.ACCOUNTS = [{"label": "Only", "email": "o@example.com"}]
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
+        real = ourcal.list_account_events
+        ourcal.list_account_events = lambda *a: (
+            [], {"message": "m", "setup": True})
+        self.addCleanup(lambda: setattr(ourcal, "list_account_events", real))
+        _, errors = ourcal._google_collect(
+            datetime.datetime(2026, 8, 7, tzinfo=datetime.timezone.utc))
+        self.assertEqual(errors,
+                         [{"label": "Only", "message": "m", "setup": True}])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -778,7 +778,8 @@ def list_account_events(label, email, time_min, time_max):
                 break
         mismatch = account_mismatch(label, email, cals)
         if mismatch:
-            return [], mismatch   # never file another account's events here
+            # never file another account's events here
+            return [], {"message": mismatch, "setup": False}
         for cal in cals:
             if not should_include_calendar(cal):
                 continue
@@ -796,10 +797,13 @@ def list_account_events(label, email, time_min, time_max):
                 if not page:
                     break
         return events, None
-    except FileNotFoundError as e:  # setup incomplete — "re-auth" would mislead
-        return [], str(e)
+    except FileNotFoundError as e:
+        # Setup incomplete, not an auth failure: "re-auth" would mislead. The
+        # flag lets the page offer setup without string-matching this text.
+        return [], {"message": str(e), "setup": True}
     except Exception as e:  # per-account isolation
-        return [], f"{type(e).__name__} — re-auth or check access"
+        return [], {"message": f"{type(e).__name__} — re-auth or check access",
+                    "setup": False}
 
 
 def _google_collect(now, days=None):
@@ -810,7 +814,7 @@ def _google_collect(now, days=None):
         evs, err = list_account_events(a["label"], a["email"], time_min, time_max)
         all_events.extend(evs)
         if err:
-            errors.append({"label": a["label"], "message": err})
+            errors.append({"label": a["label"], **err})
     return merge_events(all_events), errors
 
 
@@ -1150,6 +1154,24 @@ def export_cli():
           "but treat\n        it as a secret anyway.", file=sys.stderr)
     print(make_bundle(files, first))
     return 0
+
+
+def setup_status():
+    """What this install actually has — the setup page's diagnostics footer.
+
+    `dataDir` and `android` are here because their being wrong is exactly the
+    failure that went unnoticed for a month: nothing on the phone ever
+    reported which directory it had resolved.
+    """
+    return {
+        "dataDir": data_dir(),
+        "android": is_android(),
+        "hasCredentials": os.path.exists(user_path("credentials.json")),
+        "accounts": len(ACCOUNTS),
+        "accountsFromFile": os.path.exists(user_path("accounts.json")),
+        "signedIn": [a["label"] for a in ACCOUNTS
+                     if os.path.exists(token_path(a["label"]))],
+    }
 
 
 # ── HTML ────────────────────────────────────────────────────────────────
