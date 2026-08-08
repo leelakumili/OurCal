@@ -2188,10 +2188,14 @@ class OurCalHandler(BaseHTTPRequestHandler):
         guess this token, because the only place the token appears is
         inside a page this server served.
 
-        Navigations are exempt: / and /setup are how the token reaches the
-        page, and neither has a side effect.
+        An allowlist, not "anything outside /api/". The exemption exists for
+        exactly two navigations — they are how the token reaches the page,
+        and neither has a side effect. Written as a denylist it would
+        silently exempt any route added later that happened not to start
+        with /api/, which is the mistake this whole method exists to avoid.
         """
-        if not self.path.startswith("/api/"):
+        path = self.path.split("?")[0]
+        if path in ("/", "/setup"):
             return True
         return secrets.compare_digest(
             self.headers.get("X-OurCal-Token") or "", SESSION_TOKEN)

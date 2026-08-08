@@ -1494,9 +1494,10 @@ class TestCallerAuth(_TmpData, unittest.TestCase):
     suite, through. On Android, where loopback is not isolated between
     apps, that same gap means any other app installed on the device can
     still drive /api/import with no Origin and no preflight to stop it.
-    Closing that needs a per-session token minted at startup and required
-    as a header on /api/*, which does not exist yet — see _local_caller's
-    docstring."""
+    That hole is closed separately, by _api_token_ok's per-session token —
+    this class is scoped to _local_caller's two browser-shaped checks, so
+    every request built here (via _req) carries a valid token already, and
+    only Origin/Host vary. See TestSessionToken for the token guard itself."""
 
     @classmethod
     def setUpClass(cls):
@@ -3005,6 +3006,18 @@ class TestSessionToken(_TmpData, unittest.TestCase):
     def test_the_token_is_not_trivially_guessable(self):
         self.assertGreaterEqual(len(ourcal.SESSION_TOKEN), 32)
         self.assertNotIn(ourcal.SESSION_TOKEN, ("", "None", "token"))
+
+    def test_the_navigation_exemption_is_an_allowlist_not_a_prefix_check(self):
+        # _api_token_ok exempts exactly "/" and "/setup" (query string aside),
+        # not "anything that doesn't start with /api/". A path that merely
+        # avoids the /api/ prefix without being one of the two real
+        # navigations must still require the token.
+        for path in ("/api", "/setup/../api/events"):
+            status, _ = self._req(path)
+            self.assertEqual(status, 403, path)
+        for path in ("/", "/?x=1", "/setup"):
+            status, _ = self._req(path)
+            self.assertEqual(status, 200, path)
 
 
 if __name__ == "__main__":
