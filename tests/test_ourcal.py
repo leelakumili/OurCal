@@ -1411,14 +1411,19 @@ class TestHttp(unittest.TestCase):
         cls.server.shutdown()
 
     def _get(self, path):
-        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}") as r:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
             return r.status, r.read().decode()
 
     def _post(self, path, obj):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}{path}",
             data=json.dumps(obj).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
         with urllib.request.urlopen(req) as r:
             return r.status, json.loads(r.read().decode())
 
@@ -1523,7 +1528,13 @@ class TestCallerAuth(_TmpData, unittest.TestCase):
         self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
 
     def _req(self, path, method="GET", origin=None, host=None, body=None):
-        headers = {}
+        # Always carry the real token: the rejection cases in this class are
+        # rejected by _local_caller (Host/Origin), which runs before the
+        # token is ever examined, so sending it here doesn't change their
+        # outcome — but the accepted cases need it now that /api/* requires
+        # one, and TestCallerAuth's job is Host/Origin, not the token.
+        headers = {"Content-Type": "application/json",
+                   "X-OurCal-Token": ourcal.SESSION_TOKEN}
         if origin is not None:
             headers["Origin"] = origin
         if host is not None:
@@ -1601,13 +1612,16 @@ class TestDeleteEndpoint(unittest.TestCase):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}{path}",
             data=json.dumps(obj).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
         with urllib.request.urlopen(req) as r:
             return r.status, json.loads(r.read().decode())
 
     def _events(self):
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{self.port}/api/events") as r:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/events",
+            headers={"X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
             return json.loads(r.read().decode())["events"]
 
     def _find(self, title):
@@ -1650,7 +1664,8 @@ class TestDeleteEndpoint(unittest.TestCase):
     def test_unknown_post_route_still_404s(self):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/api/nope", data=b"{}",
-            method="POST", headers={"Content-Type": "application/json"})
+            method="POST", headers={"Content-Type": "application/json",
+                                    "X-OurCal-Token": ourcal.SESSION_TOKEN})
         with self.assertRaises(urllib.error.HTTPError) as cm:
             urllib.request.urlopen(req)
         self.assertEqual(cm.exception.code, 404)
@@ -1678,13 +1693,16 @@ class TestUpdateEndpoint(unittest.TestCase):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}{path}",
             data=json.dumps(obj).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
         with urllib.request.urlopen(req) as r:
             return r.status, json.loads(r.read().decode())
 
     def _events(self):
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{self.port}/api/events") as r:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/events",
+            headers={"X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
             return json.loads(r.read().decode())["events"]
 
     def test_edit_round_trips_through_the_api(self):
@@ -1951,7 +1969,10 @@ class TestStartServer(unittest.TestCase):
         server, url = ourcal.start_server()
         self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
-        with urllib.request.urlopen(url + "/api/events", timeout=5) as r:
+        req = urllib.request.Request(
+            url + "/api/events",
+            headers={"X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req, timeout=5) as r:
             self.assertEqual(r.status, 200)
 
 
@@ -2821,14 +2842,19 @@ class TestSetupRoutes(_TmpData, unittest.TestCase):
         self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
 
     def _get(self, path):
-        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}") as r:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
             return r.status, r.read().decode()
 
     def _post(self, path, obj):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}{path}",
             data=json.dumps(obj).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
         with urllib.request.urlopen(req) as r:
             return r.status, json.loads(r.read().decode())
 
@@ -2904,6 +2930,81 @@ class TestSetupPageStructure(unittest.TestCase):
         # tell them apart, not just report the android flag.
         self.assertIn("s.bridge", ourcal.SETUP_PAGE)
         self.assertIn("bridge is", ourcal.SETUP_PAGE.lower())
+
+
+class TestSessionToken(_TmpData, unittest.TestCase):
+    """The hole _local_caller could not close.
+
+    Host and Origin only constrain browsers. A native process sends no
+    Origin and is accepted — on Android, where loopback is not isolated
+    between apps, that let any installed app POST credentials into this
+    app's data directory. A token minted per run and only ever present
+    inside pages this server itself served is the thing such a caller
+    cannot guess.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["OURCAL_DEMO"] = "1"
+        cls.server = ourcal.make_server(0)
+        cls.port = cls.server.server_address[1]
+        cls.t = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.t.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        self._tmp_data()
+
+    def _req(self, path, token=None, method="GET", body=None):
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["X-OurCal-Token"] = token
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(body).encode() if body is not None else None,
+            method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def test_api_without_the_token_is_refused(self):
+        status, _ = self._req("/api/events")
+        self.assertEqual(status, 403)
+
+    def test_api_with_a_wrong_token_is_refused(self):
+        status, _ = self._req("/api/events", token="not-the-token")
+        self.assertEqual(status, 403)
+
+    def test_api_with_the_right_token_succeeds(self):
+        status, body = self._req("/api/events", token=ourcal.SESSION_TOKEN)
+        self.assertEqual(status, 200)
+        self.assertIn("events", json.loads(body))
+
+    def test_a_post_without_the_token_is_refused(self):
+        status, _ = self._req("/api/import", method="POST",
+                              body={"bundle": "x", "passphrase": "y"})
+        self.assertEqual(status, 403)
+
+    def test_navigations_do_not_need_the_token(self):
+        # This is how the token reaches the page in the first place.
+        for path in ("/", "/setup"):
+            status, _ = self._req(path)
+            self.assertEqual(status, 200, path)
+
+    def test_both_pages_carry_the_real_token_not_the_placeholder(self):
+        for path in ("/", "/setup"):
+            _, body = self._req(path)
+            self.assertIn(ourcal.SESSION_TOKEN, body, path)
+            self.assertNotIn("__SESSION_TOKEN__", body, path)
+
+    def test_the_token_is_not_trivially_guessable(self):
+        self.assertGreaterEqual(len(ourcal.SESSION_TOKEN), 32)
+        self.assertNotIn(ourcal.SESSION_TOKEN, ("", "None", "token"))
 
 
 if __name__ == "__main__":

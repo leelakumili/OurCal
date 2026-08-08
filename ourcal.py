@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -204,6 +205,10 @@ DAYS_AHEAD = 30
 MAX_DAYS_AHEAD = 730
 POLL_MINUTES = 5
 PORT = 8756
+# Minted per run and only ever present inside pages this server itself
+# served. Host and Origin constrain browsers; this constrains everything
+# else, including another app on the same Android device.
+SESSION_TOKEN = secrets.token_urlsafe(32)
 # Single source of truth for the version: the release workflow reads it from
 # here, so a tag can never disagree with what the app reports.
 VERSION = "1.0.1"
@@ -1322,6 +1327,13 @@ SETUP_PAGE = r"""<!doctype html>
   <div class="diag" id="diag">checking this device&hellip;</div>
 </div>
 <script>
+const TOKEN = "__SESSION_TOKEN__";
+function api(path, opts){
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers || {},
+                               {"X-OurCal-Token": TOKEN});
+  return fetch(path, opts);
+}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>(
   {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));}
 
@@ -1340,7 +1352,7 @@ function diag(s){
 }
 
 function refresh(){
-  fetch("/api/status").then(r=>r.json()).then(diag)
+  api("/api/status").then(r=>r.json()).then(diag)
     .catch(e=>{document.getElementById("diag").textContent =
       "could not read device status: " + e;});
 }
@@ -1351,7 +1363,7 @@ document.getElementById("doImport").onclick = function(){
   out.className = "msg";
   out.textContent = "Importing… this takes a moment (the passphrase is "
                   + "deliberately slow to check).";
-  fetch("/api/import", {method:"POST",
+  api("/api/import", {method:"POST",
       headers:{"Content-Type":"application/json"},
       body: JSON.stringify({
         bundle: document.getElementById("bundle").value,
@@ -1618,6 +1630,13 @@ PAGE = r"""<!doctype html>
 
 <script>
 const POLL_MS = __POLL_MS__;
+const TOKEN = "__SESSION_TOKEN__";
+function api(path, opts){
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers || {},
+                               {"X-OurCal-Token": TOKEN});
+  return fetch(path, opts);
+}
 const PAL_LIGHT = ["#2a78d6","#eb6834","#1baf7a","#eda100","#e87ba4"];
 const PAL_DARK  = ["#5b9cf0","#ff8a5c","#3fd39c","#ffc23d","#ff9ec4"];
 let DATA = null;
@@ -1776,7 +1795,7 @@ function evRow(ev,idx){
 
 function rangeDays(){ return localStorage.getItem("ourcal-days") || "30"; }
 function load(){
-  fetch("/api/events?days="+encodeURIComponent(rangeDays()))
+  api("/api/events?days="+encodeURIComponent(rangeDays()))
     .then(r=>r.text().then(t=>{ if(!r.ok) throw new Error("HTTP "+r.status+": "+t.slice(0,300)); return JSON.parse(t); }))
     .then(d=>{ DATA=d; render(); })
     // Surface the actual reason, not a generic "could not reach". A fetch that
@@ -1939,7 +1958,7 @@ function submitDelete(){
   const ser=document.getElementById("scope-ser");
   const scope=(ser&&ser.checked)?"series":"occurrence";
   const btn=document.getElementById("delConfirmBtn"); btn.disabled=true;
-  fetch("/api/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({scope,sources:chosen})})
+  api("/api/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({scope,sources:chosen})})
     .then(r=>r.json()).then(res=>{
       const ok=(res.results||[]).filter(x=>x.ok).map(x=>x.label);
       const bad=(res.results||[]).filter(x=>!x.ok).map(x=>x.label);
@@ -2014,7 +2033,7 @@ function submitEdit(){
     location:now.location, notes:now.notes, changed:changed,
     scope:(ser&&ser.checked)?"series":"occurrence", sources:chosen};
   const btn=document.getElementById("editSaveBtn"); btn.disabled=true;
-  fetch("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+  api("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
     .then(r=>r.json()).then(res=>{
       if(res.error){ toast(res.error,true); return; }
       const ok=(res.results||[]).filter(x=>x.ok).map(x=>x.label);
@@ -2069,7 +2088,7 @@ function submit(){
     payload.inviteFrom=(hv && payload.targets.some(t=>t.label===hv))?hv:payload.targets[0].label;
   }
   document.getElementById("createBtn").disabled=true;
-  fetch("/api/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+  api("/api/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
     .then(r=>r.json()).then(res=>{
       const ok=(res.results||[]).filter(x=>x.ok).map(x=>x.label);
       const bad=(res.results||[]).filter(x=>!x.ok).map(x=>x.label);
@@ -2146,11 +2165,11 @@ class OurCalHandler(BaseHTTPRequestHandler):
         on the device can still POST to /api/import with no Origin and no
         preflight in its way, and write attacker-controlled credentials.json
         to this app's data directory; this was demonstrated against a live
-        server. Closing that would need something a browser page cannot
-        forge and a stranger's process cannot guess: a per-session token
-        minted at startup, embedded in PAGE/SETUP_PAGE, and required as a
-        header on every /api/* request. That token does not exist yet — this
-        method only closes the two browser-shaped holes above.
+        server. Closing that needs something a browser page cannot forge and
+        a stranger's process cannot guess: a per-session token minted at
+        startup, embedded in PAGE/SETUP_PAGE, and required as a header on
+        every /api/* request — see _api_token_ok, which closes that hole.
+        This method only closes the two browser-shaped holes above.
         """
         host = (self.headers.get("Host") or "").split(":")[0]
         if host not in ("127.0.0.1", "localhost", "[::1]", "::1"):
@@ -2159,13 +2178,35 @@ class OurCalHandler(BaseHTTPRequestHandler):
         return origin is None or origin.startswith(
             ("http://127.0.0.1:", "http://localhost:"))
 
+    def _api_token_ok(self):
+        """Whether an /api/* request carries this run's session token.
+
+        _local_caller closes the two browser-shaped holes; this closes the
+        one it cannot. A native caller on the same device sends no Origin
+        and passes that check, which on Android meant any installed app
+        could POST credentials into this app's data directory. It cannot
+        guess this token, because the only place the token appears is
+        inside a page this server served.
+
+        Navigations are exempt: / and /setup are how the token reaches the
+        page, and neither has a side effect.
+        """
+        if not self.path.startswith("/api/"):
+            return True
+        return secrets.compare_digest(
+            self.headers.get("X-OurCal-Token") or "", SESSION_TOKEN)
+
     def do_GET(self):
         try:
             if not self._local_caller():
                 self._send(403, json.dumps({"error": "forbidden"}))
                 return
+            if not self._api_token_ok():
+                self._send(403, json.dumps({"error": "forbidden"}))
+                return
             if self.path == "/" or self.path.startswith("/?"):
-                html = PAGE.replace("__POLL_MS__", str(POLL_MINUTES * 60000))
+                html = (PAGE.replace("__POLL_MS__", str(POLL_MINUTES * 60000))
+                            .replace("__SESSION_TOKEN__", SESSION_TOKEN))
                 self._send(200, html, "text/html; charset=utf-8")
             elif self.path.split("?")[0] == "/api/events":
                 from urllib.parse import parse_qs, urlparse
@@ -2173,7 +2214,9 @@ class OurCalHandler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(
                     get_events(days=(q.get("days") or [None])[0])))
             elif self.path == "/setup" or self.path.startswith("/setup?"):
-                self._send(200, SETUP_PAGE, "text/html; charset=utf-8")
+                self._send(200,
+                           SETUP_PAGE.replace("__SESSION_TOKEN__", SESSION_TOKEN),
+                           "text/html; charset=utf-8")
             elif self.path == "/api/status":
                 self._send(200, json.dumps(setup_status()))
             else:
@@ -2184,6 +2227,9 @@ class OurCalHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             if not self._local_caller():
+                self._send(403, json.dumps({"error": "forbidden"}))
+                return
+            if not self._api_token_ok():
                 self._send(403, json.dumps({"error": "forbidden"}))
                 return
             routes = {"/api/create": create_event, "/api/delete": delete_events,
