@@ -84,6 +84,14 @@ download a Desktop OAuth client as `credentials.json`.
 
 Full walkthrough: **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.
 
+Shipping a shared client secret inside a published app would get it revoked and
+route every user's calendar traffic through one quota — which is why this step
+cannot be done for you.
+
+Put `credentials.json` and `accounts.json` in `~/Library/Application
+Support/OurCal/` for the packaged app, or next to `ourcal.py` when running from
+source.
+
 ### On Android
 
 The Google Cloud step happens on a computer — a phone cannot realistically
@@ -103,14 +111,6 @@ passphrase you would use for a password, and delete the message afterwards.
 Android 11+ hides `Android/data` from every file manager and from MTP, so
 copying the files onto the phone directly is not possible — pasting is not a
 workaround for a missing cable, it is the only supported route.
-
-Shipping a shared client secret inside a published app would get it revoked and
-route every user's calendar traffic through one quota — which is why this step
-cannot be done for you.
-
-Put `credentials.json` and `accounts.json` in `~/Library/Application
-Support/OurCal/` for the packaged app, or next to `ourcal.py` when running from
-source.
 
 ## Features
 
@@ -206,7 +206,7 @@ matching tag (`git tag v1.0.1 && git push origin v1.0.1`) or running the release
 workflow manually. The workflow refuses to build when the tag and `VERSION`
 disagree.
 
-Android ships as a sideloaded APK from GitHub Releases instead of the Play Store — Play Protect will warn on install, and tapping "Install anyway" proceeds. The build is currently debug-signed (fine for personal use but a known gap for wider distribution); see [NOTES-android.md](NOTES-android.md) for the release-signing gap.
+Android has no release job yet — `.github/workflows/release.yml` builds the `.dmg` only. Build it from source instead: `./packaging/build-android.sh` produces `dist/OurCal-<version>-android.apk`, which you sideload yourself (Play Protect will warn on install; tapping "Install anyway" proceeds). That APK is currently debug-signed — the Android SDK's shared debug keystore, with `debuggable=true` — which is fine for a personal build but a known gap before this could be handed to anyone else; see ["Follow-on: the debug APK undercuts Part 0"](docs/superpowers/specs/2026-08-07-android-setup-import-design.md#follow-on-the-debug-apk-undercuts-part-0) for what that gap actually is. [NOTES-android.md](NOTES-android.md) covers the earlier OAuth-on-Android spike, Play Protect, build cost and the shape of the migration — not the signing gap.
 
 ## Privacy
 
