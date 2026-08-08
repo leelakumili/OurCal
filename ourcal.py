@@ -2042,8 +2042,29 @@ class OurCalHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _local_caller(self):
+        """Whether this request really came from this device's own UI.
+
+        The server binds 127.0.0.1, but that does not make it private: a page
+        on any site can POST here cross-origin (text/plain is CORS-safelisted,
+        so there is no preflight to fail), and on Android any installed app can
+        reach loopback directly. /api/import writes OAuth credentials, so an
+        unauthenticated caller could swap in their own client and harvest the
+        re-authorisation. Checking Host defeats DNS rebinding; checking Origin
+        defeats the cross-site POST.
+        """
+        host = (self.headers.get("Host") or "").split(":")[0]
+        if host not in ("127.0.0.1", "localhost", "[::1]", "::1"):
+            return False
+        origin = self.headers.get("Origin")
+        return origin is None or origin.startswith(
+            ("http://127.0.0.1:", "http://localhost:"))
+
     def do_GET(self):
         try:
+            if not self._local_caller():
+                self._send(403, json.dumps({"error": "forbidden"}))
+                return
             if self.path == "/" or self.path.startswith("/?"):
                 html = PAGE.replace("__POLL_MS__", str(POLL_MINUTES * 60000))
                 self._send(200, html, "text/html; charset=utf-8")
@@ -2063,6 +2084,9 @@ class OurCalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            if not self._local_caller():
+                self._send(403, json.dumps({"error": "forbidden"}))
+                return
             routes = {"/api/create": create_event, "/api/delete": delete_events,
                       "/api/update": update_events, "/api/import": import_endpoint}
             handler = routes.get(self.path)

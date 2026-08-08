@@ -1454,6 +1454,84 @@ class TestHttp(unittest.TestCase):
         self.assertTrue(r3["ok"])
 
 
+class TestCallerAuth(unittest.TestCase):
+    """/api/import writes OAuth credentials to disk and validated nothing
+    about who asked. text/plain is CORS-safelisted, so a cross-origin fetch
+    from any page the user visits is a simple request: no preflight, the
+    request is delivered and processed, and only the response is unreadable.
+    On Android there is no CORS at all — loopback is not isolated between
+    apps. _local_caller closes both holes, and DNS rebinding via a forged
+    Host header, for every route at once."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["OURCAL_DEMO"] = "1"
+        cls.server = ourcal.make_server(0)
+        cls.port = cls.server.server_address[1]
+        cls.t = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.t.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _req(self, path, method="GET", origin=None, host=None, body=None):
+        headers = {}
+        if origin is not None:
+            headers["Origin"] = origin
+        if host is not None:
+            headers["Host"] = host
+        data = None
+        if method == "POST":
+            data = json.dumps(body or {}).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", data=data,
+            method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def test_no_origin_succeeds(self):
+        # What the app's own page — and urllib, which every other HTTP test
+        # in this suite uses — actually sends: no Origin header at all.
+        status, _ = self._req("/api/status")
+        self.assertEqual(status, 200)
+
+    def test_cross_site_origin_is_rejected_on_import(self):
+        # The demonstrated attack: a page on any other origin POSTing to
+        # /api/import, which would otherwise write attacker-controlled
+        # credentials.json to disk.
+        status, body = self._req(
+            "/api/import", method="POST", origin="https://evil.example",
+            body={"bundle": "nonsense", "passphrase": "x"})
+        self.assertEqual(status, 403)
+        self.assertIn("error", json.loads(body))
+
+    def test_cross_site_origin_is_rejected_on_create(self):
+        # /api/create is exposed by the same hole; in scope alongside import.
+        status, body = self._req(
+            "/api/create", method="POST", origin="https://evil.example",
+            body={})
+        self.assertEqual(status, 403)
+        self.assertIn("error", json.loads(body))
+
+    def test_foreign_host_is_rejected_on_status(self):
+        # DNS rebinding: a page whose hostname later resolves to 127.0.0.1
+        # still sends its own Host header, not "127.0.0.1" or "localhost".
+        status, body = self._req("/api/status", host="evil.example")
+        self.assertEqual(status, 403)
+        self.assertIn("error", json.loads(body))
+
+    def test_loopback_origin_on_any_port_is_accepted(self):
+        # start_server() falls back to an ephemeral port when 8756 is taken,
+        # so the Origin check must accept any loopback port, not just 8756.
+        status, _ = self._req("/api/status", origin="http://127.0.0.1:9999")
+        self.assertEqual(status, 200)
+
+
 class TestDeleteEndpoint(unittest.TestCase):
     """End-to-end over HTTP in demo mode: a deleted event stops coming back."""
 
