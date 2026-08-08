@@ -170,6 +170,34 @@ ensure_data_dir()
 ACCOUNTS = load_accounts(user_path("accounts.json")) or ACCOUNTS
 
 TIMEZONE = "America/Los_Angeles"
+
+_TZ = None
+
+
+def tz():
+    """The configured timezone, resolved once and cached.
+
+    ZoneInfo(TIMEZONE) works everywhere with a system tz database. Android has
+    none, and its bundled `tzdata` package is stored in an asset bundle that
+    zoneinfo's importlib.resources-based discovery cannot open — so the normal
+    constructor raises ZoneInfoNotFoundError there. The fallback reads the tz
+    bytes straight out of the tzdata package (pkgutil.get_data works against
+    Chaquopy's loader) and builds the zone from them directly.
+    """
+    global _TZ
+    if _TZ is None:
+        try:
+            _TZ = ZoneInfo(TIMEZONE)
+        except Exception:
+            import io
+            import pkgutil
+            raw = pkgutil.get_data("tzdata", "zoneinfo/" + TIMEZONE)
+            if not raw:
+                raise
+            _TZ = ZoneInfo.from_file(io.BytesIO(raw), key=TIMEZONE)
+    return _TZ
+
+
 DAYS_AHEAD = 30
 # A wider window costs proportionally more Google calls, so the ceiling exists
 # to stop a mistyped URL spending a minute of API time.
@@ -178,7 +206,7 @@ POLL_MINUTES = 5
 PORT = 8756
 # Single source of truth for the version: the release workflow reads it from
 # here, so a tag can never disagree with what the app reports.
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # Colorblind-safe categorical palette (parallel light/dark arrays).
 PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
@@ -260,10 +288,10 @@ def _instant(s):
         # dates are naive too. Pin any naive instant to TIMEZONE so all events are
         # comparable (real Google dateTimes already carry an offset).
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo(TIMEZONE))
+            dt = dt.replace(tzinfo=tz())
         return dt
     except ValueError:
-        return datetime.max.replace(tzinfo=ZoneInfo(TIMEZONE))
+        return datetime.max.replace(tzinfo=tz())
 
 
 def _event_instant(e):
@@ -503,7 +531,7 @@ _DEMO_STORE = None
 def reset_demo(now=None):
     """(Re)seed the in-memory demo store. Used by tests and first demo read."""
     global _DEMO_STORE
-    now = now or datetime.now(ZoneInfo(TIMEZONE))
+    now = now or datetime.now(tz())
     _DEMO_STORE = _demo_fixtures(now)
 
 
@@ -525,7 +553,7 @@ def clamp_days(days):
 
 
 def get_events(now=None, days=None):
-    now = now or datetime.now(ZoneInfo(TIMEZONE))
+    now = now or datetime.now(tz())
     days = clamp_days(days)
     errors = []
     if is_demo():
@@ -1748,8 +1776,13 @@ function evRow(ev,idx){
 
 function rangeDays(){ return localStorage.getItem("ourcal-days") || "30"; }
 function load(){
-  fetch("/api/events?days="+encodeURIComponent(rangeDays())).then(r=>r.json()).then(d=>{ DATA=d; render(); })
-    .catch(()=>{ document.getElementById("banner").innerHTML='<div class="banner">⚠️ Could not reach the OurCal server.</div>'; });
+  fetch("/api/events?days="+encodeURIComponent(rangeDays()))
+    .then(r=>r.text().then(t=>{ if(!r.ok) throw new Error("HTTP "+r.status+": "+t.slice(0,300)); return JSON.parse(t); }))
+    .then(d=>{ DATA=d; render(); })
+    // Surface the actual reason, not a generic "could not reach". A fetch that
+    // never leaves the page (network) and a server 500 look identical to the
+    // user otherwise, and they need opposite fixes.
+    .catch(e=>{ document.getElementById("banner").innerHTML='<div class="banner">⚠️ '+esc(String(e&&e.message||e))+'</div>'; });
 }
 
 /* theme */

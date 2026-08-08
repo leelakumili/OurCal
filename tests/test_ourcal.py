@@ -1743,6 +1743,41 @@ class TestBootstrapGuard(unittest.TestCase):
             os.environ.pop("OURCAL_REEXEC", None)
 
 
+class TestTimezone(unittest.TestCase):
+    """Android has no system tz database, so tz() must survive a failing
+    ZoneInfo() by reading tzdata's bytes directly."""
+
+    def setUp(self):
+        ourcal._TZ = None                       # defeat the cache per test
+        self.addCleanup(lambda: setattr(ourcal, "_TZ", None))
+
+    def test_returns_a_usable_zone(self):
+        now = datetime.datetime.now(ourcal.tz())
+        self.assertIsNotNone(now.utcoffset())
+
+    def test_is_cached(self):
+        self.assertIs(ourcal.tz(), ourcal.tz())
+
+    def test_falls_back_when_zoneinfo_cannot_find_the_zone(self):
+        # Simulate the Android failure: the direct constructor raises, and the
+        # tzdata-bytes path must still produce the zone.
+        import zoneinfo
+        real = ourcal.ZoneInfo
+
+        class NoSystemTz:
+            def __init__(self, key):
+                raise zoneinfo.ZoneInfoNotFoundError(key)
+            from_file = staticmethod(real.from_file)
+
+        ourcal.ZoneInfo = NoSystemTz
+        self.addCleanup(lambda: setattr(ourcal, "ZoneInfo", real))
+        try:
+            import tzdata  # noqa: F401
+        except ImportError:
+            self.skipTest("tzdata not installed in this environment")
+        self.assertIsNotNone(datetime.datetime.now(ourcal.tz()).utcoffset())
+
+
 class TestPlatform(unittest.TestCase):
     """The same source runs on macOS and Android; the platform seams must
     behave correctly on the side we can test — the desktop side."""
