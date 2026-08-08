@@ -2435,6 +2435,30 @@ class TestExportImportRoundTrip(_TmpData, unittest.TestCase):
             with open(os.path.join(phone, name)) as f:
                 self.assertEqual(f.read(), body)
 
+    def test_a_non_ascii_account_label_survives_the_round_trip(self):
+        # The bundle is a cross-machine format: a non-ASCII label must
+        # survive on purpose, not merely because both Mac and Android happen
+        # to default to UTF-8 — write_user_files/collect_user_files must say
+        # encoding="utf-8" explicitly.
+        mac = self._tmp_data()
+        files = {
+            "credentials.json": '{"installed": {"client_id": "x"}}',
+            "accounts.json": json.dumps(
+                [{"label": "Renée家", "email": "l@example.com"}],
+                ensure_ascii=False)}
+        for name, body in files.items():
+            with open(os.path.join(mac, name), "w", encoding="utf-8") as f:
+                f.write(body)
+        bundle = ourcal.make_bundle(ourcal.collect_user_files(), "pw")
+
+        phone = self._tmp_data()          # redirect again: a different device
+        result = ourcal.import_bundle(bundle, "pw")
+        self.assertEqual(result["accounts"], 1)
+        self.assertEqual(ourcal.ACCOUNTS[0]["label"], "Renée家")
+        with open(os.path.join(phone, "accounts.json"),
+                 encoding="utf-8") as f:
+            self.assertEqual(f.read(), files["accounts.json"])
+
 
 class TestExportCli(_TmpData, unittest.TestCase):
     def test_refuses_without_credentials(self):

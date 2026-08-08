@@ -1118,7 +1118,10 @@ def write_user_files(files):
         # Mode at creation, not afterwards: never a window in which a token
         # file is readable by anything else on the device.
         fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
+        # Explicit, not platform-default: the bundle crosses Mac and Android,
+        # and a non-ASCII account label must not depend on both happening to
+        # default to UTF-8.
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(body)
         os.replace(tmp, os.path.join(d, name))
         written.append(name)
@@ -1144,7 +1147,7 @@ def collect_user_files():
         if not is_user_file(name):
             continue
         try:
-            with open(os.path.join(d, name)) as f:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
                 out[name] = f.read()
         except OSError:
             pass
