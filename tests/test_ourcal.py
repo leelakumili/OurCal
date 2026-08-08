@@ -2259,5 +2259,91 @@ class TestReloadAccounts(_TmpData, unittest.TestCase):
         self.assertEqual(os.listdir(tmp), [])
 
 
+class TestCollectUserFiles(_TmpData, unittest.TestCase):
+    def test_collects_only_whitelisted_names(self):
+        tmp = self._tmp_data()
+        for name in ["credentials.json", "accounts.json", "token_l.json",
+                     "notes.txt", "token_BAD.json", ".DS_Store"]:
+            with open(os.path.join(tmp, name), "w") as f:
+                f.write("{}")
+        self.assertEqual(sorted(ourcal.collect_user_files()),
+                         ["accounts.json", "credentials.json", "token_l.json"])
+
+    def test_empty_when_the_directory_is_missing(self):
+        real = ourcal.data_dir
+        ourcal.data_dir = lambda: "/nonexistent/ourcal/nowhere"
+        self.addCleanup(lambda: setattr(ourcal, "data_dir", real))
+        self.assertEqual(ourcal.collect_user_files(), {})
+
+
+class TestExportImportRoundTrip(_TmpData, unittest.TestCase):
+    """The whole point, end to end: what --export prints is what the phone
+    can open."""
+
+    def setUp(self):
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+
+    def test_a_mac_export_imports_onto_a_fresh_device(self):
+        mac = self._tmp_data()
+        files = {
+            "credentials.json": '{"installed": {"client_id": "x"}}',
+            "accounts.json": json.dumps(
+                [{"label": "Leela", "email": "l@example.com"},
+                 {"label": "Leela K", "email": "lk@example.com"}]),
+            "token_leela.json": '{"refresh_token": "a"}',
+            "token_leela-k.json": '{"refresh_token": "b"}'}
+        for name, body in files.items():
+            with open(os.path.join(mac, name), "w") as f:
+                f.write(body)
+        bundle = ourcal.make_bundle(ourcal.collect_user_files(), "pw")
+
+        phone = self._tmp_data()          # redirect again: a different device
+        result = ourcal.import_bundle(bundle, "pw")
+        self.assertEqual(result["accounts"], 2)
+        self.assertEqual(sorted(os.listdir(phone)), sorted(files))
+        for name, body in files.items():
+            with open(os.path.join(phone, name)) as f:
+                self.assertEqual(f.read(), body)
+
+
+class TestExportCli(_TmpData, unittest.TestCase):
+    def test_refuses_without_credentials(self):
+        self._tmp_data()               # empty
+        self.assertEqual(ourcal.export_cli(), 1)
+
+    def test_refuses_when_the_passphrases_differ(self):
+        import getpass
+        tmp = self._tmp_data()
+        with open(os.path.join(tmp, "credentials.json"), "w") as f:
+            f.write("{}")
+        answers = iter(["one", "two"])
+        real = getpass.getpass
+        getpass.getpass = lambda *a, **k: next(answers)
+        self.addCleanup(lambda: setattr(getpass, "getpass", real))
+        self.assertEqual(ourcal.export_cli(), 1)
+
+    def test_prints_only_the_bundle_on_stdout(self):
+        # `./ourcal.py --export | pbcopy` must pipe the bundle and nothing
+        # else; warnings go to stderr and getpass prompts on the tty.
+        import contextlib
+        import getpass
+        import io
+        tmp = self._tmp_data()
+        with open(os.path.join(tmp, "credentials.json"), "w") as f:
+            f.write('{"installed": {}}')
+        real = getpass.getpass
+        getpass.getpass = lambda *a, **k: "pw"
+        self.addCleanup(lambda: setattr(getpass, "getpass", real))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ourcal.export_cli(), 0)
+        printed = out.getvalue().strip()
+        self.assertEqual(len(printed.splitlines()), 1)
+        self.assertEqual(ourcal.open_bundle(printed, "pw"),
+                         {"credentials.json": '{"installed": {}}'})
+
+
 if __name__ == "__main__":
     unittest.main()

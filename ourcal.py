@@ -1103,6 +1103,55 @@ def import_bundle(bundle, passphrase):
     return {"ok": True, "written": written, "accounts": len(accounts)}
 
 
+def collect_user_files():
+    """The whitelisted files present in data_dir(), as {name: contents}."""
+    d = data_dir()
+    out = {}
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for name in names:
+        if not is_user_file(name):
+            continue
+        try:
+            with open(os.path.join(d, name)) as f:
+                out[name] = f.read()
+        except OSError:
+            pass
+    return out
+
+
+def export_cli():
+    """`./ourcal.py --export` — print a pasteable bundle of this setup.
+
+    Only the bundle goes to stdout, so `./ourcal.py --export | pbcopy` pipes
+    exactly the thing you paste: getpass prompts on the tty and every other
+    word goes to stderr.
+    """
+    import getpass
+    import sys
+    files = collect_user_files()
+    if "credentials.json" not in files:
+        print(f"OurCal: no credentials.json in {data_dir()} — nothing to "
+              "export.", file=sys.stderr)
+        return 1
+    first = getpass.getpass("Passphrase for the bundle: ")
+    if not first:
+        print("OurCal: a passphrase is required.", file=sys.stderr)
+        return 1
+    if first != getpass.getpass("Repeat it: "):
+        # A typo here would produce a bundle nobody can ever open.
+        print("OurCal: the two passphrases differ — nothing was written.",
+              file=sys.stderr)
+        return 1
+    print(f"OurCal: bundling {len(files)} file(s) from {data_dir()}.\n"
+          "        This carries live Google refresh tokens. It is encrypted, "
+          "but treat\n        it as a secret anyway.", file=sys.stderr)
+    print(make_bundle(files, first))
+    return 0
+
+
 # ── HTML ────────────────────────────────────────────────────────────────
 PAGE = r"""<!doctype html>
 <html lang="en">
@@ -1998,6 +2047,11 @@ def want_window():
 
 
 def main():
+    import sys
+    if "--export" in sys.argv:
+        # Before ensure_deps(): export is stdlib-only and must work on a
+        # machine where the Google libraries are missing or broken.
+        raise SystemExit(export_cli())
     if not is_demo():
         ensure_deps()
     if want_window():
