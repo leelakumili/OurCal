@@ -144,19 +144,36 @@ All stdlib (`hashlib`, `hmac`, `os.urandom`, `base64`, `gzip`).
   `dk = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, 600_000, dklen=64)`
   → `enc_key = dk[:32]`, `mac_key = dk[32:]`.
 - **Keystream.** Block `i` (from 0) is
-  `sha256(enc_key ‖ nonce ‖ i.to_bytes(8, "big")).digest()`; blocks are
-  concatenated and truncated to the plaintext length, then XORed.
+  `hmac(enc_key, nonce ‖ i.to_bytes(8, "big"), sha256).digest()`; blocks are
+  concatenated and truncated to the plaintext length, then XORed. This is the
+  HKDF-Expand shape — a keyed PRF in counter mode. An earlier draft specified
+  `sha256(enc_key ‖ nonce ‖ i)` instead; no break was found in it, but that is
+  the secret-prefix construction HMAC exists to avoid, and switching cost
+  nothing before any real bundle existed.
 - **MAC.** `hmac.new(mac_key, b"ourcal1" ‖ salt ‖ nonce ‖ ciphertext, sha256)`.
   Encrypt-then-MAC. The version string is inside the MAC so the format version
   cannot be swapped. Verified with `hmac.compare_digest` **before** any
   decryption is attempted.
 
-**Accepted risk — the keystream is a custom construction.** SHA-256 in counter
-mode is conservative and well understood (it is essentially HMAC-DRBG), but it
-is not a vetted cipher and no stdlib alternative exists. This is a deliberate
-trade against adding a native `cryptography` wheel to an Android build that
-currently has none and builds clean. Recorded here so it is a known property of
-the design, not an accident.
+**Accepted risk — the keystream is a custom construction.** HMAC-SHA256 in
+counter mode is a conservative, well-understood way to build a PRF stream, but
+composing your own stream cipher is still not the same as using a vetted one,
+and no stdlib alternative exists. This is a deliberate trade against adding a
+native `cryptography` wheel to an Android build that currently has none and
+builds clean. Recorded here so it is a known property of the design, not an
+accident.
+
+**Whitespace.** A pasted bundle is normalised with `"".join(text.split())`, not
+`text.strip()`. The bundle crosses through a messaging app by design and those
+hard-wrap long strings; stripping only the ends leaves embedded newlines that
+throw off base64 padding and surface as "looks truncated" to a user who pasted
+the whole thing.
+
+**Format pinning.** One known-answer test holds a hardcoded bundle and asserts
+its exact decoded contents. Every other test round-trips through this same code
+and would stay green through a format change — while bundles from a different
+build stopped opening. The phone runs a sideloaded APK that does not
+auto-update, so a Mac one version ahead of the phone is the normal case.
 
 **Decrypt order** (any failure aborts before the next step):
 prefix check → base64 decode → length **> 64** (64 bytes of framing plus a
