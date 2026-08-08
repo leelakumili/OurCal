@@ -149,9 +149,17 @@ def parse_accounts(raw):
 
 
 def load_accounts(path):
-    """accounts.json → account list, or None if absent, unreadable, or invalid."""
+    """accounts.json → account list, or None if absent, unreadable, or invalid.
+
+    Explicit encoding, not the platform default: write_user_files always
+    writes this file as UTF-8 (a label can be non-ASCII), and under a
+    non-UTF-8 locale a bare open() would raise UnicodeDecodeError — a
+    ValueError subclass — which the except below already catches, silently
+    returning None and leaving the placeholder accounts in place instead of
+    surfacing the import as broken.
+    """
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return parse_accounts(json.load(f))
     except (OSError, ValueError):
         return None
@@ -764,7 +772,10 @@ def creds_for(label, email):
               flush=True)
         flow = InstalledAppFlow.from_client_secrets_file(cred_file, SCOPES)
         creds = run_oauth_flow(flow)
-    with open(path, "w") as f:
+    # Explicit encoding, not the platform default: this file crosses Mac and
+    # Android like every other user file, so it must not depend on either
+    # one's ambient locale.
+    with open(path, "w", encoding="utf-8") as f:
         f.write(creds.to_json())
     return creds
 
@@ -2081,15 +2092,32 @@ class OurCalHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _local_caller(self):
-        """Whether this request really came from this device's own UI.
+        """Whether this request looks like this device's own UI — not proof.
 
-        The server binds 127.0.0.1, but that does not make it private: a page
-        on any site can POST here cross-origin (text/plain is CORS-safelisted,
-        so there is no preflight to fail), and on Android any installed app can
-        reach loopback directly. /api/import writes OAuth credentials, so an
-        unauthenticated caller could swap in their own client and harvest the
-        re-authorisation. Checking Host defeats DNS rebinding; checking Origin
-        defeats the cross-site POST.
+        Two checks, two different browser-shaped holes:
+
+        - Host must be a loopback name. This defeats DNS rebinding: a
+          hostname that later resolves to 127.0.0.1 still sends its own
+          Host header in the request, never "127.0.0.1" or "localhost".
+        - Origin, when present, must be http://127.0.0.1:* or
+          http://localhost:*. This defeats a cross-origin browser POST: a
+          page on any other site can still fire the request (text/plain is
+          CORS-safelisted, so there is no preflight to block it), but the
+          Origin header the browser attaches to it gets rejected here.
+
+        Neither check does anything about a caller that isn't a browser. A
+        native process sends no Origin header at all, and `origin is None`
+        is accepted — that is what lets this app's own page (and every
+        script using urllib) through. On Android, where loopback is not
+        isolated between apps, that same gap means any other app installed
+        on the device can still POST to /api/import with no Origin and no
+        preflight in its way, and write attacker-controlled credentials.json
+        to this app's data directory; this was demonstrated against a live
+        server. Closing that would need something a browser page cannot
+        forge and a stranger's process cannot guess: a per-session token
+        minted at startup, embedded in PAGE/SETUP_PAGE, and required as a
+        header on every /api/* request. That token does not exist yet — this
+        method only closes the two browser-shaped holes above.
         """
         host = (self.headers.get("Host") or "").split(":")[0]
         if host not in ("127.0.0.1", "localhost", "[::1]", "::1"):

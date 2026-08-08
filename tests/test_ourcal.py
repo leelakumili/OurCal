@@ -1454,14 +1454,44 @@ class TestHttp(unittest.TestCase):
         self.assertTrue(r3["ok"])
 
 
-class TestCallerAuth(unittest.TestCase):
-    """/api/import writes OAuth credentials to disk and validated nothing
-    about who asked. text/plain is CORS-safelisted, so a cross-origin fetch
-    from any page the user visits is a simple request: no preflight, the
-    request is delivered and processed, and only the response is unreadable.
-    On Android there is no CORS at all — loopback is not isolated between
-    apps. _local_caller closes both holes, and DNS rebinding via a forged
-    Host header, for every route at once."""
+class _TmpData:
+    """Point data_dir() at a throwaway directory.
+
+    CONTRIBUTING.md:49 — never point tests at real credentials. In a checkout
+    data_dir() is APP_DIR, the repo itself, where the developer's real
+    credentials.json, accounts.json and token files live. A test that writes
+    without redirecting would overwrite them.
+    """
+
+    def _tmp_data(self):
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real = ourcal.data_dir
+        ourcal.data_dir = lambda: tmp
+        self.addCleanup(lambda: setattr(ourcal, "data_dir", real))
+        return tmp
+
+
+class TestCallerAuth(_TmpData, unittest.TestCase):
+    """/api/import writes OAuth credentials to disk and, before this guard,
+    validated nothing about who asked. text/plain is CORS-safelisted, so a
+    cross-origin fetch from any page the user visits is a simple request: no
+    preflight, the request is delivered and processed, and only the response
+    is unreadable — _local_caller's Origin check closes that hole, and its
+    Host check closes DNS rebinding via a forged Host header, for every
+    route at once.
+
+    Neither check closes the non-browser hole. A native caller sends no
+    Origin header, and the guard accepts `origin is None` — that is exactly
+    what lets this app's own page, and every urllib-based test in this
+    suite, through. On Android, where loopback is not isolated between
+    apps, that same gap means any other app installed on the device can
+    still drive /api/import with no Origin and no preflight to stop it.
+    Closing that needs a per-session token minted at startup and required
+    as a header on /api/*, which does not exist yet — see _local_caller's
+    docstring."""
 
     @classmethod
     def setUpClass(cls):
@@ -1474,6 +1504,23 @@ class TestCallerAuth(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+
+    def setUp(self):
+        # Every route in this class is exercised over real HTTP, and the
+        # guard being tested is exactly the thing that is supposed to stand
+        # between an unauthenticated caller and the owner's real
+        # credentials.json/accounts.json/token files. Relying on the guard
+        # to 403 before any real file is touched is the same "safe because
+        # something else fires first" reasoning that was rejected for
+        # TestSetupRoutes — redirect data_dir() per test here too, so a
+        # guard regression (or a future test added to this class that
+        # reaches a real handler) can never read or write the real
+        # directory. Per-test, not per-class, for the same reason
+        # TestSetupRoutes does it per-test: no leftover state from one test
+        # can leak into another.
+        self.tmp = self._tmp_data()
+        real_accounts = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
 
     def _req(self, path, method="GET", origin=None, host=None, body=None):
         headers = {}
@@ -2285,26 +2332,6 @@ class TestBundleWireFormat(unittest.TestCase):
             {"credentials.json": '{"installed": {"client_id": "kat"}}'})
 
 
-class _TmpData:
-    """Point data_dir() at a throwaway directory.
-
-    CONTRIBUTING.md:49 — never point tests at real credentials. In a checkout
-    data_dir() is APP_DIR, the repo itself, where the developer's real
-    credentials.json, accounts.json and token files live. A test that writes
-    without redirecting would overwrite them.
-    """
-
-    def _tmp_data(self):
-        import shutil
-        import tempfile
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        real = ourcal.data_dir
-        ourcal.data_dir = lambda: tmp
-        self.addCleanup(lambda: setattr(ourcal, "data_dir", real))
-        return tmp
-
-
 class TestUserFileWhitelist(unittest.TestCase):
     """A bundle is untrusted input. Names are matched against a whitelist,
     never sanitised: os.path.join with a crafted name is a traversal."""
@@ -2478,8 +2505,29 @@ class TestExportImportRoundTrip(_TmpData, unittest.TestCase):
     def test_a_non_ascii_account_label_survives_the_round_trip(self):
         # The bundle is a cross-machine format: a non-ASCII label must
         # survive on purpose, not merely because both Mac and Android happen
-        # to default to UTF-8 — write_user_files/collect_user_files must say
-        # encoding="utf-8" explicitly.
+        # to default to UTF-8 — collect_user_files/write_user_files/
+        # load_accounts must say encoding="utf-8" explicitly.
+        #
+        # The trouble: this machine's own ambient locale is *also* UTF-8, so
+        # every assertion below on file *contents* would still pass even if
+        # a future edit quietly dropped one of those explicit encodings and
+        # fell back to the platform default — exactly the bug this test is
+        # supposed to catch (verified against a real regression: reverting
+        # load_accounts's encoding="utf-8" does not fail any assertion in
+        # this test on this machine). A test cannot force the interpreter
+        # into a non-UTF-8 locale mid-process either — open()'s default
+        # encoding is resolved inside the C `_io` module straight from the
+        # OS locale; patching the Python-level locale.getpreferredencoding
+        # has no effect on it (checked by hand: monkeypatching it and
+        # writing a non-ASCII string through a plain open() with no
+        # encoding= still writes UTF-8 on this interpreter).
+        #
+        # So alongside the behavioral round trip, this spies on every
+        # open() of the two files it touches and asserts encoding="utf-8"
+        # was passed explicitly each time. That assertion is about what the
+        # source code asks for, not what this machine's locale happens to
+        # produce, so it stays meaningful regardless of the ambient locale
+        # — and it would have caught the load_accounts miss even here.
         mac = self._tmp_data()
         files = {
             "credentials.json": '{"installed": {"client_id": "x"}}',
@@ -2489,10 +2537,32 @@ class TestExportImportRoundTrip(_TmpData, unittest.TestCase):
         for name, body in files.items():
             with open(os.path.join(mac, name), "w", encoding="utf-8") as f:
                 f.write(body)
-        bundle = ourcal.make_bundle(ourcal.collect_user_files(), "pw")
 
-        phone = self._tmp_data()          # redirect again: a different device
-        result = ourcal.import_bundle(bundle, "pw")
+        import builtins
+        encodings_seen = []
+        real_open = builtins.open
+
+        def spy_open(file, *args, **kwargs):
+            if isinstance(file, str) and os.path.basename(file) in files:
+                encodings_seen.append(kwargs.get("encoding"))
+            return real_open(file, *args, **kwargs)
+
+        builtins.open = spy_open
+        try:
+            bundle = ourcal.make_bundle(ourcal.collect_user_files(), "pw")
+            phone = self._tmp_data()      # redirect again: a different device
+            result = ourcal.import_bundle(bundle, "pw")
+        finally:
+            builtins.open = real_open
+
+        # collect_user_files read both files on "mac"; reload_accounts (via
+        # import_bundle) read accounts.json back on "phone". Every one of
+        # those open() calls must have named utf-8 explicitly — none may
+        # have fallen through to the platform default (encoding=None).
+        self.assertTrue(encodings_seen)
+        self.assertTrue(all(enc == "utf-8" for enc in encodings_seen),
+                        encodings_seen)
+
         self.assertEqual(result["accounts"], 1)
         self.assertEqual(ourcal.ACCOUNTS[0]["label"], "Renée家")
         with open(os.path.join(phone, "accounts.json"),
