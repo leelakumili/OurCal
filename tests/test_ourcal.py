@@ -2649,7 +2649,15 @@ class TestSetupErrorFlag(unittest.TestCase):
         self.assertIn("leela@example.com", err["message"])
 
 
-class TestSetupRoutes(unittest.TestCase):
+class TestSetupRoutes(_TmpData, unittest.TestCase):
+    """CONTRIBUTING.md:49 — never let a test reach the real data directory.
+    Every test in this class posts to live routes over HTTP, and a bad bundle
+    is meant to fail before any write happens — but that is an implementation
+    detail, one bug away from overwriting the owner's real credentials.json,
+    accounts.json and four token files. data_dir() is redirected per-test
+    (setUp), not once for the class, so no test can see another test's
+    leftover files and no ordering assumption is load-bearing."""
+
     @classmethod
     def setUpClass(cls):
         os.environ["OURCAL_DEMO"] = "1"
@@ -2661,6 +2669,11 @@ class TestSetupRoutes(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        real_accounts = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
 
     def _get(self, path):
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}") as r:
@@ -2681,11 +2694,21 @@ class TestSetupRoutes(unittest.TestCase):
         self.assertIn("/api/import", body)
 
     def test_status_endpoint_shape(self):
+        # data_dir() is redirected to a fresh temp dir per test (setUp), so
+        # this no longer reads the real device — assert key names and types,
+        # not specific paths or counts that would depend on that real state.
         _, body = self._get("/api/status")
         s = json.loads(body)
         self.assertEqual(sorted(s), ["accounts", "accountsFromFile", "android",
                                      "bridge", "dataDir", "hasCredentials",
                                      "signedIn"])
+        self.assertIsInstance(s["dataDir"], str)
+        self.assertIsInstance(s["android"], bool)
+        self.assertIsInstance(s["bridge"], bool)
+        self.assertIsInstance(s["hasCredentials"], bool)
+        self.assertIsInstance(s["accounts"], int)
+        self.assertIsInstance(s["accountsFromFile"], bool)
+        self.assertIsInstance(s["signedIn"], list)
 
     def test_import_reports_a_bad_bundle_without_a_500(self):
         status, body = self._post("/api/import",
@@ -2693,6 +2716,7 @@ class TestSetupRoutes(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(body["ok"])
         self.assertIn("doesn't look like an OurCal bundle", body["error"])
+        self.assertEqual(os.listdir(self.tmp), [])
 
     def test_import_reports_a_wrong_passphrase(self):
         bundle = ourcal.make_bundle({"credentials.json": "{}"}, "right")
@@ -2700,16 +2724,9 @@ class TestSetupRoutes(unittest.TestCase):
                              {"bundle": bundle, "passphrase": "wrong"})
         self.assertFalse(body["ok"])
         self.assertIn("Wrong passphrase", body["error"])
+        self.assertEqual(os.listdir(self.tmp), [])
 
     def test_import_writes_a_real_bundle(self):
-        import shutil
-        import tempfile
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        real_dir, real_accounts = ourcal.data_dir, ourcal.ACCOUNTS
-        ourcal.data_dir = lambda: tmp
-        self.addCleanup(lambda: setattr(ourcal, "data_dir", real_dir))
-        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
         bundle = ourcal.make_bundle(
             {"credentials.json": '{"installed": {}}',
              "accounts.json": json.dumps(
@@ -2720,7 +2737,7 @@ class TestSetupRoutes(unittest.TestCase):
         self.assertEqual(body["written"],
                          ["accounts.json", "credentials.json"])
         self.assertEqual(body["accounts"], 1)
-        self.assertEqual(sorted(os.listdir(tmp)),
+        self.assertEqual(sorted(os.listdir(self.tmp)),
                          ["accounts.json", "credentials.json"])
 
 
