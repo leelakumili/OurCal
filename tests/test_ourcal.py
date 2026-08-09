@@ -3464,12 +3464,29 @@ class TestSignInAccountCheck(_TmpData, unittest.TestCase):
         self.addCleanup(lambda: setattr(ourcal, "run_oauth_flow", real_flow))
 
     def _serving(self, primary_email):
+        # pageToken=None accepted (and ignored, one page): the pagination fix
+        # calls .list(pageToken=page_token) on every iteration, matching
+        # list_account_events's identical loop.
         class _Cals:
-            def list(self):
+            def list(self, pageToken=None):
                 return self
 
             def execute(self):
                 return {"items": [{"id": primary_email, "primary": True}]}
+
+        class _Svc:
+            def calendarList(self):
+                return _Cals()
+        self.disc_mod.build = lambda *a, **kw: _Svc()
+
+    def _serving_no_primary(self):
+        class _Cals:
+            def list(self, pageToken=None):
+                return self
+
+            def execute(self):
+                return {"items": [{"id": "team@group.calendar.google.com",
+                                   "selected": True}]}
 
         class _Svc:
             def calendarList(self):
@@ -3486,6 +3503,60 @@ class TestSignInAccountCheck(_TmpData, unittest.TestCase):
 
     def test_a_matching_account_writes_the_token(self):
         self._serving("one@example.com")
+        ourcal._run_signin("One", "one@example.com")
+        self.assertTrue(os.path.exists(ourcal.token_path("One")))
+
+    def test_the_written_token_is_owner_only(self):
+        # FIX 3: _run_signin used a plain open(path, "w"), landing at 0644 on
+        # a default umask — the same secret write_user_files always made
+        # 0600. Both writers must agree now that both route through
+        # write_secret_file.
+        import stat
+        self._serving("one@example.com")
+        ourcal._run_signin("One", "one@example.com")
+        mode = stat.S_IMODE(os.stat(ourcal.token_path("One")).st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_a_primary_calendar_on_a_later_page_is_still_checked(self):
+        # The bug: calendarList().list() was unpaginated, so an account whose
+        # primary calendar fell on page 2 made primary_email() return "" and
+        # silently skipped the mismatch check below — the exact check this
+        # whole flow exists to run. Fails open, not closed. This fakes a
+        # two-page response where the mismatch is only visible on page 2, and
+        # proves both pages actually get walked.
+        calls = []
+
+        class _Cals:
+            def list(self, pageToken=None):
+                calls.append(pageToken)
+                return self
+
+            def execute(self):
+                if len(calls) == 1:
+                    return {"items": [{"id": "other@x.com", "selected": True}],
+                            "nextPageToken": "p2"}
+                return {"items": [{"id": "someone.else@example.com",
+                                   "primary": True}]}
+
+        class _Svc:
+            def calendarList(self):
+                return _Cals()
+        self.disc_mod.build = lambda *a, **kw: _Svc()
+
+        with self.assertRaises(RuntimeError) as cm:
+            ourcal._run_signin("One", "one@example.com")
+        self.assertIn("someone.else@example.com", str(cm.exception))
+        self.assertEqual(calls, [None, "p2"])   # both pages were walked
+        self.assertFalse(os.path.exists(ourcal.token_path("One")))
+
+    def test_writes_the_token_when_the_primary_calendar_is_undeterminable(self):
+        # Deliberate, documenting the same fallback account_mismatch uses
+        # elsewhere (see TestAccountIdentity.test_no_error_when_primary_
+        # undeterminable): if no primary calendar is ever returned at all,
+        # the account cannot be identified, and the check does not block the
+        # user on a guess. This is NOT the page-2 bug above — full pagination
+        # ran and genuinely found no primary calendar anywhere.
+        self._serving_no_primary()
         ourcal._run_signin("One", "one@example.com")
         self.assertTrue(os.path.exists(ourcal.token_path("One")))
 

@@ -1666,14 +1666,25 @@ def _run_signin(label, email):
         json.loads(client_config_text()), SCOPES)
     creds = run_oauth_flow(flow)
     svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
-    cals = svc.calendarList().list().execute().get("items", [])
+    # Paginated, like list_account_events's identical loop: an unpaginated
+    # call only ever saw page 1, so an account whose primary calendar fell on
+    # a later page made primary_email() return "" and silently skipped the
+    # mismatch check below — the exact check this whole flow exists to run.
+    # That fails open, not closed.
+    cals = []
+    page_token = None
+    while True:
+        resp = svc.calendarList().list(pageToken=page_token).execute()
+        cals.extend(resp.get("items", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
     actual = primary_email(cals)
     if actual and actual != (email or "").strip().lower():
         raise RuntimeError(
             f"Signed in as {actual}, not {email} — tap Sign in again and "
             f"pick {email}.")
-    with open(token_path(label), "w", encoding="utf-8") as f:
-        f.write(creds.to_json())
+    write_secret_file(token_path(label), creds.to_json())
 
 
 def start_signin(label):
