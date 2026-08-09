@@ -2997,6 +2997,37 @@ class TestSetupRoutes(_TmpData, unittest.TestCase):
         self.assertEqual(sorted(os.listdir(self.tmp)),
                          ["accounts.json", "credentials.json"])
 
+    def test_accounts_route_adds_an_account(self):
+        # /api/accounts and /api/accounts/remove were, until now, tested only
+        # by calling add_account/remove_account directly — the routes dict
+        # wiring and the endpoint wrappers (accounts_endpoint,
+        # accounts_remove_endpoint) were unverified, unlike /api/import's
+        # sibling test above.
+        status, body = self._post(
+            "/api/accounts", {"label": "Phone", "email": "p@example.com"})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"], body)
+        self.assertEqual(body["accounts"], 1)
+        with open(os.path.join(self.tmp, "accounts.json"),
+                  encoding="utf-8") as f:
+            written = json.load(f)
+        self.assertEqual([a["label"] for a in written], ["Phone"])
+
+    def test_accounts_remove_route_removes_the_account_and_its_token(self):
+        self._post("/api/accounts", {"label": "Phone", "email": "p@example.com"})
+        self._post("/api/accounts", {"label": "Second", "email": "s@example.com"})
+        tok = ourcal.token_path("Phone")
+        with open(tok, "w", encoding="utf-8") as f:
+            f.write("{}")
+        status, body = self._post("/api/accounts/remove", {"label": "Phone"})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"], body)
+        self.assertFalse(os.path.exists(tok))
+        with open(os.path.join(self.tmp, "accounts.json"),
+                  encoding="utf-8") as f:
+            written = json.load(f)
+        self.assertEqual([a["label"] for a in written], ["Second"])
+
 
 class TestSetupPageStructure(unittest.TestCase):
     def test_page_has_the_markers_it_needs(self):
