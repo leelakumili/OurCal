@@ -3351,13 +3351,52 @@ class TestSignInAccountCheck(_TmpData, unittest.TestCase):
 
 class TestNeedsSignIn(_TmpData, unittest.TestCase):
     """Loading the agenda must never open a browser. It did, four times,
-    sequentially, inside one HTTP request."""
+    sequentially, inside one HTTP request.
+
+    google-auth is an optional runtime dep not installed where the suite
+    runs (CONTRIBUTING.md; CI installs neither it nor google-auth-oauthlib
+    before testing), so its two modules that creds_for imports at its top —
+    google.oauth2.credentials and google.auth.transport.requests — are
+    stubbed via sys.modules, same as TestSignInAccountCheck does for the
+    modules _run_signin imports. The account here has no token file, so
+    neither stand-in's attribute is ever called; it only needs to exist.
+    """
 
     def setUp(self):
         self.tmp = self._tmp_data()
         with open(os.path.join(self.tmp, "credentials.json"), "w",
                   encoding="utf-8") as f:
             f.write('{"installed": {"client_id": "x"}}')
+
+        import sys
+        import types
+
+        google_pkg = types.ModuleType("google")
+        oauth2_pkg = types.ModuleType("google.oauth2")
+        credentials_mod = types.ModuleType("google.oauth2.credentials")
+        credentials_mod.Credentials = type("Credentials", (), {})
+        auth_pkg = types.ModuleType("google.auth")
+        transport_pkg = types.ModuleType("google.auth.transport")
+        requests_mod = types.ModuleType("google.auth.transport.requests")
+        requests_mod.Request = type("Request", (), {})
+        stubs = {
+            "google": google_pkg,
+            "google.oauth2": oauth2_pkg,
+            "google.oauth2.credentials": credentials_mod,
+            "google.auth": auth_pkg,
+            "google.auth.transport": transport_pkg,
+            "google.auth.transport.requests": requests_mod,
+        }
+        originals = {name: sys.modules.get(name) for name in stubs}
+        sys.modules.update(stubs)
+
+        def _restore():
+            for name, mod in originals.items():
+                if mod is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = mod
+        self.addCleanup(_restore)
 
     def test_creds_for_raises_instead_of_launching_a_browser(self):
         launched = []
