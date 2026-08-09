@@ -1437,16 +1437,26 @@ function diag(s){
 
 function renderAccounts(s){
   const box = document.getElementById("accts");
-  if(!s.accounts){ box.textContent = "No accounts yet."; return; }
+  // accountLabels/accounts are the placeholders (Personal/you@example.com,
+  // Work/you@work.example.com) until accounts.json exists — listing them as
+  // if real, with working Remove/Sign in buttons, is what made a stranger's
+  // first "Add" collide with a placeholder of the same name. Fresh install:
+  // say so and stop, instead of rendering accounts nobody added.
+  if(!s.accountsFromFile){ box.textContent = "No accounts yet — add one below."; return; }
   box.innerHTML = (s.accountLabels || []).map(function(l){
     const on = (s.signedIn || []).indexOf(l) >= 0;
+    // Sign in is always offered, not just while `on` is false: a revoked
+    // grant or a dead token leaves the file present (so signedIn stays
+    // true) with no way to recover if the button disappears once it's ever
+    // been true.
     return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">'
       + '<span style="flex:1">' + esc(l) + '</span>'
       + '<span>' + (on ? "✓ signed in" : "not signed in") + '</span>'
       + '<button class="rm" data-label="' + esc(l) + '"'
       + ' style="padding:4px 8px;font-size:12px">Remove</button>'
-      + (on ? "" : '<button class="si" data-label="' + esc(l) + '"'
-        + ' style="padding:4px 8px;font-size:12px">Sign in</button>')
+      + '<button class="si" data-label="' + esc(l) + '"'
+      + ' style="padding:4px 8px;font-size:12px">'
+      + (on ? "Sign in again" : "Sign in") + '</button>'
       + '</div>';
   }).join("");
   box.querySelectorAll(".rm").forEach(function(b){
@@ -1563,9 +1573,19 @@ def add_account(label, email):
     The whole list is validated, not just the new entry, because the rules
     that matter are relational: a label that collides after slugging would
     silently share another account's token file.
+
+    Seeded from `[]`, not ACCOUNTS, when accounts.json does not exist yet.
+    ACCOUNTS holds the Personal/Work placeholders before a first real
+    account is added, and Work is the exact label the design's own mock-up
+    uses — appending to the placeholders made a stranger's first "Add"
+    collide with a placeholder they never added ("That account is invalid or
+    already added"), and a non-colliding label would have materialised both
+    placeholders into a real accounts.json. The first real account must
+    replace the placeholders, not join them.
     """
     label, email = str(label or "").strip(), str(email or "").strip()
-    proposed = [dict(a) for a in ACCOUNTS] + [{"label": label, "email": email}]
+    base = ACCOUNTS if os.path.exists(user_path("accounts.json")) else []
+    proposed = [dict(a) for a in base] + [{"label": label, "email": email}]
     if parse_accounts(proposed) is None:
         return {"ok": False,
                 "error": "That account is invalid or already added."}

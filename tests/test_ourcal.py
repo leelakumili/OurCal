@@ -2982,6 +2982,30 @@ class TestSetupPageStructure(unittest.TestCase):
         self.assertIn("s.bridge", ourcal.SETUP_PAGE)
         self.assertIn("bridge is", ourcal.SETUP_PAGE.lower())
 
+    def test_no_internal_link_is_missing_the_session_key(self):
+        # Same requirement as PAGE's: an internal link with no ?k= is a 403
+        # the user cannot recover from without knowing to retype the URL.
+        for href in re.findall(r'href=\\?"(/[^"\\]*)', ourcal.SETUP_PAGE):
+            if href.startswith("/api/"):
+                continue
+            self.assertIn("k=__SESSION_TOKEN__", href, href)
+
+    def test_accounts_list_does_not_show_placeholders_before_import(self):
+        # Personal/you@example.com and Work/you@work.example.com are
+        # placeholders until accounts.json exists. Listing them as if real —
+        # with working Remove/Sign in buttons — made a stranger's first "Add"
+        # of an account named "Work" (the design's own mock-up example)
+        # collide with a placeholder of the same name they never added.
+        self.assertIn("accountsFromFile", ourcal.SETUP_PAGE)
+        self.assertIn("No accounts yet", ourcal.SETUP_PAGE)
+
+    def test_sign_in_is_always_offered_not_only_before_first_success(self):
+        # A revoked grant or dead token leaves the token file present, so
+        # signedIn stays true — the button must not disappear once it's ever
+        # been true, or a dead account has no way back.
+        self.assertNotIn('(on ? "" :', ourcal.SETUP_PAGE)
+        self.assertIn("Sign in again", ourcal.SETUP_PAGE)
+
 
 class TestSessionToken(_TmpData, unittest.TestCase):
     """The hole _local_caller could not close.
@@ -3171,6 +3195,42 @@ class TestBundledCredentials(_TmpData, unittest.TestCase):
         with self.assertRaises(FileNotFoundError) as cm:
             ourcal.client_config_text()
         self.assertIn("credentials.json is missing", str(cm.exception))
+
+
+class TestFirstRunAddAccount(_TmpData, unittest.TestCase):
+    """A fresh install has no accounts.json, so ACCOUNTS holds the
+    Personal/you@example.com and Work/you@work.example.com placeholders. Before
+    this fix, add_account seeded `proposed` from ACCOUNTS, so a stranger's
+    first action — adding "Work", the exact label the design's own mock-up
+    uses — collided with the placeholder of the same name and failed with
+    "That account is invalid or already added", an account they never added.
+    A non-colliding label would have been worse: it would have materialised
+    both placeholders into a real accounts.json.
+    """
+
+    def setUp(self):
+        self.tmp = self._tmp_data()   # no accounts.json written here
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+        # Exactly what a fresh install's ACCOUNTS holds: the module-level
+        # placeholders, resolved because no accounts.json exists yet.
+        ourcal.ACCOUNTS = [
+            {"label": "Personal", "email": "you@example.com"},
+            {"label": "Work", "email": "you@work.example.com"},
+        ]
+
+    def test_adding_work_on_a_fresh_install_succeeds(self):
+        r = ourcal.add_account("Work", "me@gmail.com")
+        self.assertTrue(r["ok"], r)
+
+    def test_the_first_real_account_replaces_the_placeholders(self):
+        ourcal.add_account("Work", "me@gmail.com")
+        self.assertEqual(
+            [a["label"] for a in ourcal.ACCOUNTS], ["Work"])
+        with open(os.path.join(self.tmp, "accounts.json"),
+                  encoding="utf-8") as f:
+            written = json.load(f)
+        self.assertEqual(written, [{"label": "Work", "email": "me@gmail.com"}])
 
 
 class TestAccountsEditor(_TmpData, unittest.TestCase):
