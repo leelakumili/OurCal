@@ -195,13 +195,37 @@ adds a second credential-writing endpoint.
 
 - `SESSION_TOKEN = secrets.token_urlsafe(32)`, minted once at import.
 - Substituted into `PAGE` and `SETUP_PAGE` at serve time, exactly as
-  `__POLL_MS__` already is.
+  `__POLL_MS__` already is — including into every in-page link between the
+  two pages, not only the JS constant.
 - Every `/api/*` request must carry it in an `X-OurCal-Token` header; `403`
-  otherwise. `GET /` and `GET /setup` are navigations and are exempt — the
-  existing `Host`/`Origin` checks still apply to them.
+  otherwise. `GET /` and `GET /setup` also require it, as a `?k=` query
+  parameter rather than a header, since a header is not something a page
+  navigation can attach to itself.
 
-A local attacker cannot read the token without already being able to read the
-page, which requires passing the `Host` and `Origin` checks.
+**First-draft version of this section was wrong.** It argued "a local
+attacker cannot read the token without already being able to read the page,
+which requires passing the Host and Origin checks" — and the paragraph twelve
+lines above this one already states that the Android attacker *passes* those
+checks by construction (no `Origin` header at all), so that argument
+concludes the hole is closed using the exact premise that leaves it open. It
+was: exempt `GET /` and `GET /setup` from the token entirely, so a native
+caller — which the rest of this document establishes clears `_local_caller`
+for free — could fetch either page with no token, read `SESSION_TOKEN` out of
+the served HTML, and replay it against every `/api/*` route. Demonstrated
+live: `POST /api/import` returned `{"ok": true}` with an attacker-controlled
+`credentials.json` on disk this way.
+
+What the fix above actually provides: the token now gates `/` and `/setup`
+themselves, so there is no unauthenticated request that returns either page's
+HTML at all. The only route the token reaches a legitimate caller by is the
+URL this process itself constructs and hands to the in-process view —
+`start_server()` bakes `?k=SESSION_TOKEN` into the URL passed to WKWebView on
+macOS and to Toga's WebView on Android — plus the in-page links between `/`
+and `/setup`, which carry the key forward the same way. A caller that never
+sees that URL, including a user who hand-types
+`http://127.0.0.1:8756/` instead of using the one the app opened, gets `403`
+from both pages and from every `/api/*` route, with no bootstrap path back
+in.
 
 **Cost:** every existing HTTP test must send the header. That is mechanical but
 touches several test classes, and the plan must account for it rather than
@@ -241,8 +265,11 @@ returns 409; `creds_for` raises `NeedsSignIn` rather than launching a browser;
 `list_account_events` turns that into an error entry with `signin: True`.
 
 **Session token:** an `/api/*` request without the header returns 403; with the
-correct header succeeds; `GET /` and `GET /setup` work without it; the token
-appears in both served pages and differs from the placeholder.
+correct header succeeds; `GET /` and `GET /setup` return 403 without the
+correct `?k=` and succeed with it — including the composition case a first
+draft of this suite missed: a caller with no key at all cannot fetch either
+page and read the token out of it to bootstrap one; the token appears in both
+served pages (once the key is supplied) and differs from the placeholder.
 
 **Regression:** the existing agenda, create, delete and update paths still work
 with the header added.

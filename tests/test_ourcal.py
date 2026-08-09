@@ -1,4 +1,4 @@
-import copy, datetime, json, os, time, unittest
+import copy, datetime, json, os, re, time, unittest
 from zoneinfo import ZoneInfo
 os.environ.setdefault("OURCAL_DEMO", "1")  # keep imports side-effect free / no google
 import ourcal
@@ -1428,7 +1428,10 @@ class TestHttp(unittest.TestCase):
             return r.status, json.loads(r.read().decode())
 
     def test_root_serves_ourcal_html(self):
-        status, body = self._get("/")
+        # "/" requires the session key as a ?k= query parameter, not the
+        # X-OurCal-Token header _get sends — a header is not something a
+        # page navigation can attach to itself.
+        status, body = self._get(f"/?k={ourcal.SESSION_TOKEN}")
         self.assertEqual(status, 200)
         self.assertIn("OurCal", body)
         self.assertNotIn("__POLL_MS__", body)  # placeholder substituted
@@ -1966,14 +1969,28 @@ class TestStartServer(unittest.TestCase):
         server, url = ourcal.start_server()
         self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
-        self.assertTrue(url.endswith(f":{free}"))
+        # url now ends in "?k=<token>", not the port, so check the port shows
+        # up before the query string rather than at the very end.
+        self.assertIn(f":{free}/?k=", url)
+
+    def test_the_returned_url_carries_the_session_key(self):
+        # This is the actual fix: the URL handed to the in-process view (and
+        # printed by run_server) is the only route by which a legitimate
+        # caller ever reaches / or /setup now that both require ?k=.
+        server, url = ourcal.start_server()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.assertIn(f"k={ourcal.SESSION_TOKEN}", url)
+        with urllib.request.urlopen(url, timeout=5) as r:
+            self.assertEqual(r.status, 200)
 
     def test_the_server_actually_answers(self):
         server, url = ourcal.start_server()
         self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
+        port = server.server_address[1]
         req = urllib.request.Request(
-            url + "/api/events",
+            f"http://127.0.0.1:{port}/api/events",
             headers={"X-OurCal-Token": ourcal.SESSION_TOKEN})
         with urllib.request.urlopen(req, timeout=5) as r:
             self.assertEqual(r.status, 200)
@@ -2159,8 +2176,21 @@ class TestPageStructure(unittest.TestCase):
 
     def test_setup_stays_reachable_after_setup_succeeds(self):
         # The banner disappears once it works; re-importing after a revoked
-        # token must not require breaking the app first.
-        self.assertIn('class="setup-link" href="/setup"', ourcal.PAGE)
+        # token must not require breaking the app first. The link must also
+        # carry the session key forward — /setup 403s without one, so a
+        # stripped-down link would be a dead end.
+        self.assertIn('class="setup-link" href="/setup?k=__SESSION_TOKEN__"',
+                      ourcal.PAGE)
+
+    def test_no_internal_link_is_missing_the_session_key(self):
+        # Every internal navigation (to / or /setup) must carry ?k=, or
+        # clicking it is a 403 the user cannot recover from without knowing
+        # to retype the URL by hand. Catches a link added later that forgets
+        # it, the same way the exploited href="/setup" once did.
+        for href in re.findall(r'href=\\?"(/[^"\\]*)', ourcal.PAGE):
+            if href.startswith("/api/"):
+                continue
+            self.assertIn("k=__SESSION_TOKEN__", href, href)
 
 
 class TestAndroidProbe(unittest.TestCase):
@@ -2876,7 +2906,8 @@ class TestSetupRoutes(_TmpData, unittest.TestCase):
             return r.status, json.loads(r.read().decode())
 
     def test_setup_page_is_served(self):
-        status, body = self._get("/setup")
+        # /setup requires ?k=, not the X-OurCal-Token header _get sends.
+        status, body = self._get(f"/setup?k={ourcal.SESSION_TOKEN}")
         self.assertEqual(status, 200)
         self.assertIn("Set up this device", body)
         self.assertIn("/api/import", body)
@@ -2958,9 +2989,11 @@ class TestSessionToken(_TmpData, unittest.TestCase):
     Host and Origin only constrain browsers. A native process sends no
     Origin and is accepted — on Android, where loopback is not isolated
     between apps, that let any installed app POST credentials into this
-    app's data directory. A token minted per run and only ever present
-    inside pages this server itself served is the thing such a caller
-    cannot guess.
+    app's data directory. A token minted per run closes that gap — but only
+    if a caller with no key cannot get one by fetching an unguarded page and
+    reading it out of the HTML; that composition is what
+    test_a_caller_without_the_key_cannot_bootstrap_a_token exists to prove,
+    not just that /api/* is gated and pages carry the token.
     """
 
     @classmethod
@@ -3010,15 +3043,34 @@ class TestSessionToken(_TmpData, unittest.TestCase):
                               body={"bundle": "x", "passphrase": "y"})
         self.assertEqual(status, 403)
 
-    def test_navigations_do_not_need_the_token(self):
-        # This is how the token reaches the page in the first place.
+    def test_navigations_require_the_key_in_the_url(self):
+        # Renamed from test_navigations_do_not_need_the_token, which asserted
+        # the false half of the bug this class exists to catch: navigations
+        # DO need the token now, carried as ?k= rather than a header, because
+        # a header is not something a page load can attach to itself. This is
+        # how the token reaches the page in the first place.
         for path in ("/", "/setup"):
-            status, _ = self._req(path)
+            status, _ = self._req(f"{path}?k={ourcal.SESSION_TOKEN}")
             self.assertEqual(status, 200, path)
+
+    def test_a_caller_without_the_key_cannot_bootstrap_a_token(self):
+        # The hole this token exists to close. A native caller passes the
+        # Host/Origin checks by construction, so if it can fetch a page it can
+        # read the token out of the HTML and replay it. Both halves of that
+        # were separately asserted as correct; nothing asserted the
+        # composition. It is the same shape as the is_android() bug: a green
+        # test proving one side of a property, silent about the side that
+        # matters.
+        status, body = self._req("/")
+        self.assertEqual(status, 403)
+        self.assertNotIn(ourcal.SESSION_TOKEN, body)
+        status, body = self._req("/setup")
+        self.assertEqual(status, 403)
+        self.assertNotIn(ourcal.SESSION_TOKEN, body)
 
     def test_both_pages_carry_the_real_token_not_the_placeholder(self):
         for path in ("/", "/setup"):
-            _, body = self._req(path)
+            _, body = self._req(f"{path}?k={ourcal.SESSION_TOKEN}")
             self.assertIn(ourcal.SESSION_TOKEN, body, path)
             self.assertNotIn("__SESSION_TOKEN__", body, path)
 
@@ -3027,15 +3079,16 @@ class TestSessionToken(_TmpData, unittest.TestCase):
         self.assertNotIn(ourcal.SESSION_TOKEN, ("", "None", "token"))
 
     def test_the_navigation_exemption_is_an_allowlist_not_a_prefix_check(self):
-        # _api_token_ok exempts exactly "/" and "/setup" (query string aside),
-        # not "anything that doesn't start with /api/". A path that merely
-        # avoids the /api/ prefix without being one of the two real
-        # navigations must still require the token.
+        # _api_token_ok exempts exactly "/" and "/setup" (query string aside)
+        # when the ?k= key matches, not "anything that doesn't start with
+        # /api/". A path that merely avoids the /api/ prefix without being
+        # one of the two real navigations must still require the header
+        # token — the query key does nothing for it.
         for path in ("/api", "/setup/../api/events"):
-            status, _ = self._req(path)
+            status, _ = self._req(f"{path}?k={ourcal.SESSION_TOKEN}")
             self.assertEqual(status, 403, path)
-        for path in ("/", "/?x=1", "/setup"):
-            status, _ = self._req(path)
+        for path in ("/", "/setup"):
+            status, _ = self._req(f"{path}?k={ourcal.SESSION_TOKEN}")
             self.assertEqual(status, 200, path)
 
 

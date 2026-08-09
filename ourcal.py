@@ -1373,7 +1373,7 @@ SETUP_PAGE = r"""<!doctype html>
 </head>
 <body><div class="wrap">
   <h1>Set up this device</h1>
-  <div class="sub"><a href="/">&larr; back to the agenda</a></div>
+  <div class="sub"><a href="/?k=__SESSION_TOKEN__">&larr; back to the agenda</a></div>
 
   <div class="card">
     <label>Accounts</label>
@@ -1527,7 +1527,7 @@ document.getElementById("doImport").onclick = function(){
         out.className = "msg good";
         out.innerHTML = "Imported " + d.written.length + " file(s): "
           + esc(d.written.join(", ")) + ".<br>" + d.accounts
-          + " account(s) configured. <a href=\"/\">Open the agenda</a>.";
+          + " account(s) configured. <a href=\"/?k=__SESSION_TOKEN__\">Open the agenda</a>.";
         document.getElementById("bundle").value = "";
         document.getElementById("passphrase").value = "";
       } else {
@@ -1819,7 +1819,7 @@ PAGE = r"""<!doctype html>
   <div id="banner"></div>
   <div id="agenda"></div>
   <div style="text-align:center;margin-top:28px;font-size:12px">
-    <a class="setup-link" href="/setup" style="color:var(--muted)">Set up this device</a>
+    <a class="setup-link" href="/setup?k=__SESSION_TOKEN__" style="color:var(--muted)">Set up this device</a>
   </div>
 </div>
 
@@ -2016,9 +2016,9 @@ function render(){
   // problem with one fix, not N problems. Any other mix keeps the
   // per-account banners: an expired token must not hide behind "not set up".
   banner.innerHTML = (errs.length && errs.every(e=>e.setup))
-    ? `<div class="banner">⚠️ OurCal isn't set up on this device yet. <a class="setup-link" href="/setup" style="color:var(--accent)">Set up this device</a></div>`
+    ? `<div class="banner">⚠️ OurCal isn't set up on this device yet. <a class="setup-link" href="/setup?k=__SESSION_TOKEN__" style="color:var(--accent)">Set up this device</a></div>`
     : errs.map(e=>`<div class="banner">⚠️ ${e.signin
-        ? `<b>${esc(e.label)}</b> isn't signed in. <a class="setup-link" href="/setup" style="color:var(--accent)">Sign in</a>`
+        ? `<b>${esc(e.label)}</b> isn't signed in. <a class="setup-link" href="/setup?k=__SESSION_TOKEN__" style="color:var(--accent)">Sign in</a>`
         : `Couldn't refresh <b>${esc(e.label)}</b> — ${esc(e.message)}`}</div>`).join("");
 
   const box=document.getElementById("agenda");
@@ -2419,6 +2419,10 @@ class OurCalHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        # Blocks a hostile page from iframing the UI: without this, the
+        # framed page's own fetches carry a valid Origin and would sail
+        # through _local_caller's check.
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(data)
 
@@ -2445,10 +2449,13 @@ class OurCalHandler(BaseHTTPRequestHandler):
         preflight in its way, and write attacker-controlled credentials.json
         to this app's data directory; this was demonstrated against a live
         server. Closing that needs something a browser page cannot forge and
-        a stranger's process cannot guess: a per-session token minted at
-        startup, embedded in PAGE/SETUP_PAGE, and required as a header on
-        every /api/* request — see _api_token_ok, which closes that hole.
-        This method only closes the two browser-shaped holes above.
+        a stranger's process cannot construct without already having it: a
+        per-session token minted at startup, required as a header on every
+        /api/* request and, since / and /setup are how that token's value
+        ever reaches a legitimate caller in the first place, as a ?k= query
+        parameter on those two pages themselves — see _api_token_ok, which
+        closes that hole. This method only closes the two browser-shaped
+        holes above.
         """
         host = (self.headers.get("Host") or "").split(":")[0]
         if host not in ("127.0.0.1", "localhost", "[::1]", "::1"):
@@ -2458,24 +2465,38 @@ class OurCalHandler(BaseHTTPRequestHandler):
             ("http://127.0.0.1:", "http://localhost:"))
 
     def _api_token_ok(self):
-        """Whether an /api/* request carries this run's session token.
+        """Whether this request carries this run's session token.
 
         _local_caller closes the two browser-shaped holes; this closes the
         one it cannot. A native caller on the same device sends no Origin
         and passes that check, which on Android meant any installed app
-        could POST credentials into this app's data directory. It cannot
-        guess this token, because the only place the token appears is
-        inside a page this server served.
+        could POST credentials into this app's data directory.
 
-        An allowlist, not "anything outside /api/". The exemption exists for
-        exactly two navigations — they are how the token reaches the page,
-        and neither has a side effect. Written as a denylist it would
-        silently exempt any route added later that happened not to start
-        with /api/, which is the mistake this whole method exists to avoid.
+        This does NOT rest on the token being unguessable by an attacker who
+        never sees it — an earlier version of this docstring claimed exactly
+        that and was wrong: a native caller that could fetch `/` or `/setup`
+        with no token requirement at all could simply read the token back out
+        of the HTML those pages carried, then replay it against every
+        `/api/*` route. That was demonstrated live. Both navigations are now
+        gated by the same token, passed as `?k=` rather than a header,
+        because a header is not something a page load can attach to itself.
+
+        The token reaches the real UI only because this process controls the
+        one URL that opens it: `start_server()` mints `SESSION_TOKEN` and
+        bakes it into the URL handed to the in-process view (WKWebView on
+        macOS, Toga's WebView on Android) and into every in-page link between
+        `/` and `/setup`. A caller that never sees that URL — including a
+        user who hand-types `http://127.0.0.1:8756/` instead of using the
+        URL the app itself opened — has no way to construct it and gets 403,
+        same as any other unauthenticated request. That is the actual
+        guarantee: not secrecy of an opaque string, but that nothing reaches
+        either page or any `/api/*` route without the key this run minted.
         """
-        path = self.path.split("?")[0]
+        path, _, query = self.path.partition("?")
         if path in ("/", "/setup"):
-            return True
+            from urllib.parse import parse_qs
+            return secrets.compare_digest(
+                (parse_qs(query).get("k") or [""])[0], SESSION_TOKEN)
         return secrets.compare_digest(
             self.headers.get("X-OurCal-Token") or "", SESSION_TOKEN)
 
@@ -2544,6 +2565,11 @@ def start_server():
     run can print advice and let you fix it, but a double-clicked .app has no
     terminal to print to — refusing to start there just looks like an icon that
     does nothing. Any port beats no window.
+
+    The URL carries `?k=SESSION_TOKEN`: `/` and `/setup` require the token
+    exactly like `/api/*` does (see `_api_token_ok`), so this is the only way
+    the in-process view — or a script printing the URL — ever reaches either
+    page.
     """
     import threading
     try:
@@ -2552,7 +2578,7 @@ def start_server():
         server = make_server(0)     # 0 → the OS picks a free port
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, f"http://127.0.0.1:{port}"
+    return server, f"http://127.0.0.1:{port}/?k={SESSION_TOKEN}"
 
 
 def run_app_window():
@@ -2599,7 +2625,10 @@ def run_app_window():
 
 def run_server():
     server, url = start_server()
-    if not url.endswith(str(PORT)):
+    # Compare the bound port, not the URL's suffix: the URL now ends in
+    # "?k=<token>", not the port number, since start_server() bakes the
+    # session key into it.
+    if server.server_address[1] != PORT:
         print(f"OurCal: port {PORT} was busy, using {url} instead.")
     print(f"OurCal running at {url}  (Ctrl-C to stop)")
     try:
