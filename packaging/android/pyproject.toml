@@ -29,4 +29,5 @@ requires = [
 [tool.briefcase.app.ourcal.android]
 requires = ["toga-android~=0.4.0"]
 # INTERNET is granted by default; nothing else is needed — no calendar
-# permission, no storage permission (external files dir needs none).
+# permission, no storage permission (data lives in the app's private internal
+# storage, getFilesDir(), which needs none — not the external files dir).

@@ -96,7 +96,7 @@ any size. The same artwork produces Android's launcher icons — `mipmap` at
    `packaging/build-app.sh` and the current release workflow.
 
 The app code, the Edit feature, `merge_events`, the data-directory handling and
-all 206 tests survive the migration untouched. That single-codebase property is
+the full test suite survive the migration untouched. That single-codebase property is
 the whole reason for choosing Briefcase over reimplementing the backend in
 JavaScript — a second implementation would double the surface for exactly the
 class of bug that cost us an hour tonight (one field handled in `normalize` but

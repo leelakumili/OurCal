@@ -3,8 +3,8 @@
 **A unified calendar dashboard for every Google account you own.**
 
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
-![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
-![Tests](https://img.shields.io/badge/tests-206-brightgreen)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Android-lightgrey)
+![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-2-brightgreen)
 
 OurCal brings **all calendars from all of your Google accounts** into a single
@@ -201,7 +201,7 @@ TIMEZONE = "America/Los_Angeles"
 DAYS_AHEAD = 30
 POLL_MINUTES = 5
 PORT = 8756
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 ```
 
 ## Development
@@ -210,7 +210,7 @@ VERSION = "1.0.0"
 python3 -m unittest discover tests -v
 ```
 
-217 tests, no Google credentials or network needed — the suite runs in demo mode
+No Google credentials or network needed — the full suite runs in demo mode
 against in-memory fixtures.
 
 | Task | Command |

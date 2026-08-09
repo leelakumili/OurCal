@@ -63,8 +63,10 @@ detected, revocation of the client, which breaks the app for everyone until a ne
 one is issued and users re-authorise.
 
 That risk is accepted because it is small at this scale (an unknown project's
-identity has little phishing value), the failure is recoverable by rotation, and
-the alternative trades it for a large certain cost: abandoning the loopback flow
+identity has little phishing value), the failure is recoverable by rotation
+plus a re-release — existing installs break until users re-sideload, since
+there is no Android release job today — and the alternative trades it for a
+large certain cost: abandoning the loopback flow
 the spike proved on real hardware for a custom-scheme route unproven under
 Chaquopy. This project has already lost a month to one unproven Android
 assumption.
@@ -287,8 +289,10 @@ real calendar.
 
 Needs a human: **clicking through Google's consent screen**, which cannot be
 automated, and **installing the APK and running it on the phone**. The critical
-on-device check remains the setup page's footer showing a data directory with no
-`chaquopy/AssetFinder` in it.
+on-device check remains the setup page's footer — it now states `android
+branch: live` or `android branch: not active` directly (plus a separate line
+if the Java bridge is unavailable), not the `chaquopy/AssetFinder` heuristic
+this doc originally described, which appears nowhere in the code.
 
 ---
 

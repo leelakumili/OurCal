@@ -245,8 +245,10 @@ normal.
   calendar is checked/visible in the left sidebar of *that account*.
 - Calendars whose IDs contain `#holiday`, `#contacts`, or `addressbook` are
   intentionally skipped (holidays and auto-generated contact birthdays).
-- To force a fresh sign-in for one account, delete its `token_<label>.json`
-  and run OurCal again.
+- To force a fresh sign-in for one account, open `/setup` and click that
+  account's **Sign in** (or **Sign in again**) button. Sign-in is a button
+  now, not something a restart triggers — `creds_for` no longer opens a
+  browser as a side effect of loading the agenda.
 
 **Adding a work / Workspace account (e.g. `you@work.example.com`).**
 Add it to `accounts.json` (by hand, or via **Accounts** on `/setup`), add the
@@ -276,8 +278,10 @@ Another program (or a previous OurCal) holds the port. Free it with
 `lsof -ti tcp:8756 | xargs kill`, or change `PORT` at the top of `ourcal.py`.
 
 **Reset everything.**
-Delete all `token_*.json` (re-signs in) and/or `.ourcal-venv/` (re-installs
-deps on next run). `credentials.json` stays.
+Delete all `token_*.json` to sign every account out — this does *not* sign
+you back in by itself; open `/setup` and click **Sign in** for each account
+afterward. Delete `.ourcal-venv/` to force a dependency reinstall on next
+run. `credentials.json` stays.
 
 **On Android, every account says `credentials.json is missing`.**
 This APK was built without a bundled OAuth client — a paste-only build (see
@@ -287,10 +291,12 @@ paste-only APK" when it makes one of these). Tap **Set up this device**, or open
 --export`. If instead your accounts show "isn't signed in" rather than this
 message, the client is already bundled — see ["On Android: sign in on the
 device"](#on-android-sign-in-on-the-device) and just tap **Sign in**. The
-footer of the `/setup` page also shows the directory the app resolved: if it
-contains `chaquopy/AssetFinder`, the Android branch is not active and the app
-is running desktop code paths — rebuild from a source tree that includes the
-`is_android()` interpreter probe.
+footer of the `/setup` page also shows the directory the app resolved and
+states the diagnosis directly: `android branch: live` or `android branch:
+not active`, with a separate line if the Java bridge is unavailable. If it
+says `not active` on a real device, the app is running desktop code
+paths — rebuild from a source tree that includes the `is_android()`
+interpreter probe.
 
 **The setup page rejects my bundle.**
 `Wrong passphrase, or the bundle was altered in transit` means exactly that,
