@@ -1717,7 +1717,14 @@ def start_signin(label):
             if "timed out" in low or "timeout" in low:
                 text = "Timed out waiting for Google — tap Sign in again."
             elif "name or service not known" in low or "getaddrinfo" in low \
-                    or "no address associated" in low:
+                    or "no address associated" in low \
+                    or "nodename nor servname provided" in low:
+                # The fourth clause is macOS's own wording for the same DNS
+                # failure the other three catch on Linux/glibc and elsewhere.
+                # The .dmg is this project's primary distribution today, so
+                # macOS is the platform where the raw OSError actually reaches
+                # a user; requests may wrap it, so this matches on the inner
+                # text via str(e) rather than the exception type.
                 text = ("Couldn't reach Google — check your connection and "
                         "try again.")
             _SIGNIN.update({"state": "error", "message": text})

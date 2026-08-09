@@ -3411,6 +3411,25 @@ class TestSignInEndpoint(_TmpData, unittest.TestCase):
                           "Couldn't reach Google — check your connection "
                           "and try again.")
 
+    def test_a_macos_dns_failure_gets_the_spec_message(self):
+        # macOS's own wording for the same failure — distinct from glibc's
+        # "Name or service not known" the test above covers. The .dmg is
+        # this project's primary distribution today, so macOS is the
+        # platform where the raw OSError actually reaches a user; requests
+        # may wrap it, hence matching on the text via str(e).
+        self._fake_flow(boom=OSError(
+            "[Errno 8] nodename nor servname provided, or not known"))
+        ourcal.start_signin("One")
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "error")
+        self.assertEqual(s["message"],
+                          "Couldn't reach Google — check your connection "
+                          "and try again.")
+
 
 class TestSignInAccountCheck(_TmpData, unittest.TestCase):
     """The consent screen shows only the address, and it looks identical for
