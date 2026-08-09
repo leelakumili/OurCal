@@ -30,7 +30,13 @@ done
 [ -n "$PY" ] || { echo "need Python 3.10+ to build (found only $(python3 -V))"; exit 1; }
 echo "building with $PY ($("$PY" -V))"
 
-rm -rf "$BUILD" "$DIST"
+# Remove only this script's own outputs — its build tree, the .app, and any
+# .dmg it previously produced — never the whole dist/ directory. build-android.sh
+# writes dist/OurCal-<version>-android.apk, and a macOS build must not delete an
+# Android artifact that happens to share the directory; a full "rm -rf $DIST"
+# did exactly that.
+rm -rf "$BUILD" "$DIST/OurCal.app"
+rm -f "$DIST"/OurCal-*.dmg
 mkdir -p "$BUILD" "$DIST"
 
 # ── icon ────────────────────────────────────────────────────────────────
