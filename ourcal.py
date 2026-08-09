@@ -104,6 +104,28 @@ def ensure_data_dir():
     return d
 
 
+def write_secret_file(path, text):
+    """Write a credential file the way every credential file must be written.
+
+    Mode at creation, never chmod'd after, so there is no window in which a
+    refresh token is readable by anything else on the machine — and written to
+    a temp name then renamed, so a crash mid-write cannot leave truncated JSON
+    that later reads as a corrupt token with no way to recover.
+
+    Every writer of a secret file routes through this: write_user_files (the
+    bundle import path), creds_for's refresh write-back, and _run_signin's
+    token write. Before this helper existed, the last two used a plain
+    open(path, "w"), which on a default umask lands the file at 0644 — the
+    same refresh token ending up world-readable or owner-only depending
+    entirely on which of three code paths happened to write it last.
+    """
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 def slug(label):
     """Filesystem-safe token key: lowercase, non-alnum → single hyphen, trimmed."""
     s = re.sub(r"[^a-z0-9]+", "-", label.lower())
@@ -808,11 +830,9 @@ def creds_for(label, email):
     else:
         client_config_text()      # raises FileNotFoundError if absent at all
         raise NeedsSignIn(label)
-    # Explicit encoding, not the platform default: this file crosses Mac and
-    # Android like every other user file, so it must not depend on either
-    # one's ambient locale.
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(creds.to_json())
+    # write_secret_file, not a plain open(): a refreshed token is exactly as
+    # sensitive as the one sign-in wrote and must land 0600 the same way.
+    write_secret_file(path, creds.to_json())
     return creds
 
 
@@ -1167,16 +1187,9 @@ def write_user_files(files):
     d = ensure_data_dir()
     written = []
     for name, body in sorted(files.items()):
-        tmp = os.path.join(d, "." + name + ".tmp")
-        # Mode at creation, not afterwards: never a window in which a token
-        # file is readable by anything else on the device.
-        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        # Explicit, not platform-default: the bundle crosses Mac and Android,
-        # and a non-ASCII account label must not depend on both happening to
-        # default to UTF-8.
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(body)
-        os.replace(tmp, os.path.join(d, name))
+        # write_secret_file: same 0600-at-creation, write-then-rename
+        # guarantee as every other credential file, not a second copy of it.
+        write_secret_file(os.path.join(d, name), body)
         written.append(name)
     return written
 

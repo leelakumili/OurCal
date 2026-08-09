@@ -2445,6 +2445,34 @@ class TestUserFileWhitelist(unittest.TestCase):
             self.assertFalse(ourcal.is_user_file(bad), bad)
 
 
+class TestWriteSecretFile(_TmpData, unittest.TestCase):
+    """The one writer every credential file routes through. Before this
+    helper existed, creds_for's refresh write-back and _run_signin's token
+    write both used a plain open(path, "w"), which on a default umask lands
+    at 0644 — the same refresh token ending up world-readable or owner-only
+    depending on which of three code paths wrote it last."""
+
+    def test_writes_the_content_atomically_with_owner_only_mode(self):
+        import stat
+        tmp = self._tmp_data()
+        path = os.path.join(tmp, "secret.json")
+        ourcal.write_secret_file(path, "top secret")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "top secret")
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        self.assertEqual(mode, 0o600)
+        # No leftover ".tmp" file from the write-then-rename.
+        self.assertEqual(os.listdir(tmp), ["secret.json"])
+
+    def test_overwrites_existing_content_cleanly(self):
+        tmp = self._tmp_data()
+        path = os.path.join(tmp, "secret.json")
+        ourcal.write_secret_file(path, "first")
+        ourcal.write_secret_file(path, "second")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "second")
+
+
 class TestWriteUserFiles(_TmpData, unittest.TestCase):
     GOOD = {"credentials.json": '{"installed": {"client_id": "x"}}',
             "accounts.json": '[{"label": "L", "email": "l@example.com"}]',
