@@ -2,8 +2,11 @@
 # Double-click launcher for OurCal. Opens the dashboard in your browser.
 cd "$(dirname "$0")" || exit 1
 
-# Open the browser shortly after the server starts (runs in the background).
-( sleep 2; open "http://127.0.0.1:8756" >/dev/null 2>&1 ) &
+# The browser is opened by ourcal.py itself (run_server), not from here: the
+# port can move if 8756 is busy, and every run mints a fresh session key
+# that must be in the URL's ?k= or / and /setup answer 403. Only the process
+# that started the server knows either value, so this script no longer
+# guesses a URL — it just launches ourcal.py and lets it open the right one.
 
 # macOS ships Python 3.9, which Google's libraries warn about on every launch.
 # Prefer a newer one when it's installed; 3.9 still works if it isn't.

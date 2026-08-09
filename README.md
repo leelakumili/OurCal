@@ -38,9 +38,11 @@ No Google account, no setup, nothing to configure:
 OURCAL_DEMO=1 python3 ourcal.py
 ```
 
-Open <http://127.0.0.1:8756>. Demo mode serves realistic fixtures and every flow
-is clickable — create, edit, sync and delete all work against an in-memory
-store, so it is the safe place to try deleting something.
+This opens your browser to the dashboard automatically. If it doesn't, use
+the URL printed in the terminal — a bare `http://127.0.0.1:8756` (no `?k=`
+key) now returns 403 by design. Demo mode serves realistic fixtures and
+every flow is clickable — create, edit, sync and delete all work against an
+in-memory store, so it is the safe place to try deleting something.
 
 ## Install
 

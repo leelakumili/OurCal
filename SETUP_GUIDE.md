@@ -12,8 +12,11 @@ You can try the whole interface **right now, with zero setup**:
 OURCAL_DEMO=1 python3 ourcal.py
 ```
 
-Then open <http://127.0.0.1:8756>. **Demo mode shows made-up events and two
-placeholder accounts** — it never contacts Google and ignores `accounts.json`. To see your real calendars, stop it and follow the steps below once.
+This opens your browser to the dashboard automatically. If it doesn't, use
+the URL printed in the terminal — it ends in `?k=` plus a key minted fresh
+for this run; a bare `http://127.0.0.1:8756` (no key) gets a 403.
+**Demo mode shows made-up events and two placeholder accounts** — it never
+contacts Google and ignores `accounts.json`. To see your real calendars, stop it and follow the steps below once.
 
 ---
 
@@ -126,7 +129,13 @@ and installs its two dependencies (`google-api-python-client`,
 `google-auth-oauthlib`), then relaunches itself from that venv. (This happens
 once; later runs are instant.)
 
-Open <http://127.0.0.1:8756>. **Nothing signs you in automatically** — each
+OurCal opens your browser to the dashboard automatically once the server is
+up. If it doesn't, use the URL printed in the terminal instead of typing
+`http://127.0.0.1:8756` by hand — that bare address now returns 403. The
+URL carries a `?k=` key minted fresh each run, and the port can shift too
+if 8756 is busy, so a bookmarked dashboard URL from a previous run won't
+work; always use the one the current run just printed (or double-click
+`OurCal.command` again). **Nothing signs you in automatically** — each
 account you haven't authorised yet shows a banner with a **Sign in** link.
 Click it (it opens `/setup`), then click that account's own **Sign in**
 button there. OurCal only runs one Google sign-in at a time, so do this once

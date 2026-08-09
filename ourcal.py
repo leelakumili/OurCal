@@ -2695,6 +2695,12 @@ def run_server():
     if server.server_address[1] != PORT:
         print(f"OurCal: port {PORT} was busy, using {url} instead.")
     print(f"OurCal running at {url}  (Ctrl-C to stop)")
+    # Open the browser here, not from OurCal.command: this is the only place
+    # that has the real URL, ?k=<SESSION_TOKEN> included. A launcher script
+    # that opens a browser itself has no way to know the port (it can move)
+    # or the per-run key (it can't), and would land the user on a 403.
+    import webbrowser
+    webbrowser.open(url)
     try:
         while True:
             time.sleep(3600)
