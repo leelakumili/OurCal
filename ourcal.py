@@ -2554,8 +2554,13 @@ class OurCalHandler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         if path in ("/", "/setup"):
             from urllib.parse import parse_qs
+            key = (parse_qs(query).get("k") or [""])[0]
+            # compare_digest raises TypeError for a str with non-ASCII
+            # characters instead of returning False — encoding both sides
+            # to bytes first makes a non-ASCII key just another wrong key
+            # (403), not a 500 that echoes interpreter internals.
             return secrets.compare_digest(
-                (parse_qs(query).get("k") or [""])[0], SESSION_TOKEN)
+                key.encode("utf-8", "surrogateescape"), SESSION_TOKEN.encode())
         return secrets.compare_digest(
             self.headers.get("X-OurCal-Token") or "", SESSION_TOKEN)
 

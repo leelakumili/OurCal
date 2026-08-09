@@ -3143,6 +3143,20 @@ class TestSessionToken(_TmpData, unittest.TestCase):
             status, _ = self._req(f"{path}?k={ourcal.SESSION_TOKEN}")
             self.assertEqual(status, 200, path)
 
+    def test_a_non_ascii_key_is_refused_not_a_500(self):
+        # compare_digest raises TypeError for a str with non-ASCII
+        # characters instead of returning False. Before encoding both sides
+        # to bytes, this one wrong key behaved differently from every other
+        # wrong key: do_GET's blanket except turned the TypeError into a 500
+        # that echoed the interpreter's message back to the caller. Access
+        # was still denied either way, so this isn't a bypass — but a wrong
+        # key must 403 like any other wrong key, not 500.
+        key = urllib.parse.quote("café-δοκιμή")
+        for path in ("/", "/setup"):
+            status, body = self._req(f"{path}?k={key}")
+            self.assertEqual(status, 403, path)
+            self.assertNotIn("non-ASCII", body, path)
+
     def test_a_caller_without_the_key_cannot_bootstrap_a_token(self):
         # The hole this token exists to close. A native caller passes the
         # Host/Origin checks by construction, so if it can fetch a page it can
