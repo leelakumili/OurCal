@@ -1172,6 +1172,21 @@ def reload_accounts():
     return ACCOUNTS
 
 
+def accounts_from_file():
+    """Whether accounts.json exists AND parses. Existence is not enough.
+
+    load_accounts returns None for a file that fails parse_accounts, and
+    `ACCOUNTS = load_accounts(...) or ACCOUNTS` leaves the Personal/Work
+    placeholders standing. So a hand-typo'd file looks like a fresh install
+    to ACCOUNTS while looking configured to anything that only asks whether
+    the file is there — and that mismatch reproduced the first-run bug:
+    /setup listed placeholders as real accounts, and the first Add was
+    refused as a duplicate of one the user never added. SETUP_GUIDE tells
+    people to edit this file by hand, so a typo in it is reachable.
+    """
+    return load_accounts(user_path("accounts.json")) is not None
+
+
 def write_user_files(files):
     """Validate every entry, then write them all. Returns the names written.
 
@@ -1292,7 +1307,12 @@ def setup_status():
         "hasCredentials": source is not None,
         "credentialsSource": source,
         "accounts": len(ACCOUNTS),
-        "accountsFromFile": os.path.exists(user_path("accounts.json")),
+        "accountsFromFile": accounts_from_file(),
+        # Distinct from "no file yet": the app is ignoring a file that is
+        # sitting right there, and the next Add will replace it. Saying so is
+        # the difference between a puzzling reset and an expected one.
+        "accountsFileBroken": (os.path.exists(user_path("accounts.json"))
+                               and not accounts_from_file()),
         "accountLabels": [a["label"] for a in ACCOUNTS],
         "signedIn": [a["label"] for a in ACCOUNTS
                      if os.path.exists(token_path(a["label"]))],
@@ -1451,7 +1471,9 @@ function diag(s){
     "data dir: " + esc(s.dataDir) + "<br>" +
     "android branch: " + (s.android ? "live" : "not active") + bridgeLine + "<br>" +
     "credentials: " + credLine + "<br>" +
-    "accounts: " + s.accounts + (s.accountsFromFile ? "" : " (placeholders)") +
+    "accounts: " + s.accounts + (s.accountsFromFile ? ""
+      : s.accountsFileBroken ? " (accounts.json unreadable — ignored)"
+      : " (placeholders)") +
     "<br>signed in: " + (s.signedIn.length ? esc(s.signedIn.join(", ")) : "none");
   renderAccounts(s);
 }
@@ -1463,7 +1485,16 @@ function renderAccounts(s){
   // if real, with working Remove/Sign in buttons, is what made a stranger's
   // first "Add" collide with a placeholder of the same name. Fresh install:
   // say so and stop, instead of rendering accounts nobody added.
-  if(!s.accountsFromFile){ box.textContent = "No accounts yet — add one below."; return; }
+  if(!s.accountsFromFile){
+    // Say which of the two it is. "Unreadable" warns that a file is sitting
+    // there being ignored and that adding an account will replace it —
+    // otherwise the replacement looks like the app silently lost your edits.
+    box.textContent = s.accountsFileBroken
+      ? "accounts.json is present but unreadable, so it's being ignored. "
+        + "Adding an account below will replace it."
+      : "No accounts yet — add one below.";
+    return;
+  }
   box.innerHTML = (s.accountLabels || []).map(function(l){
     const on = (s.signedIn || []).indexOf(l) >= 0;
     // Sign in is always offered, not just while `on` is false: a revoked
@@ -1605,7 +1636,7 @@ def add_account(label, email):
     replace the placeholders, not join them.
     """
     label, email = str(label or "").strip(), str(email or "").strip()
-    base = ACCOUNTS if os.path.exists(user_path("accounts.json")) else []
+    base = ACCOUNTS if accounts_from_file() else []
     proposed = [dict(a) for a in base] + [{"label": label, "email": email}]
     if parse_accounts(proposed) is None:
         return {"ok": False,

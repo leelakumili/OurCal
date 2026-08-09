@@ -2777,9 +2777,15 @@ class TestSetupStatus(_TmpData, unittest.TestCase):
         tmp = self._tmp_data()
         ourcal.ACCOUNTS = [{"label": "Leela", "email": "l@example.com"},
                            {"label": "Leela K", "email": "lk@example.com"}]
-        for name in ["credentials.json", "accounts.json", "token_leela.json"]:
+        for name in ["credentials.json", "token_leela.json"]:
             with open(os.path.join(tmp, name), "w") as f:
                 f.write("{}")
+        # A real accounts.json, not a `{}` stub. This test used to write the
+        # stub and assert accountsFromFile was True — which was the false
+        # positive that let a malformed file read as configured.
+        with open(os.path.join(tmp, "accounts.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(ourcal.ACCOUNTS, f)
         s = ourcal.setup_status()
         self.assertTrue(s["hasCredentials"])
         self.assertEqual(s["credentialsSource"], "pasted")
@@ -2954,6 +2960,7 @@ class TestSetupRoutes(_TmpData, unittest.TestCase):
         _, body = self._get("/api/status")
         s = json.loads(body)
         self.assertEqual(sorted(s), ["accountLabels", "accounts",
+                                     "accountsFileBroken",
                                      "accountsFromFile", "android", "bridge",
                                      "credentialsSource", "dataDir",
                                      "hasCredentials", "signedIn"])
@@ -3698,6 +3705,69 @@ class TestNeedsSignIn(_TmpData, unittest.TestCase):
         _, err = ourcal.list_account_events("One", "one@example.com", "a", "b")
         self.assertTrue(err["signin"])
         self.assertFalse(err["setup"])      # setup is fine; sign-in is not
+
+
+class TestAccountsFileThatDoesNotParse(_TmpData, unittest.TestCase):
+    """A malformed accounts.json is not the same as no accounts.json, and
+    checking os.path.exists could not tell them apart.
+
+    load_accounts returns None for a file that fails parse_accounts, and
+    `ACCOUNTS = load_accounts(...) or ACCOUNTS` leaves the Personal/Work
+    placeholders in place. So a hand-typo'd file looked like a fresh install
+    to ACCOUNTS while looking configured to anything asking only whether the
+    file exists — which reproduced the first-run bug exactly: /setup listed
+    placeholders as real accounts, and the first Add was refused as a
+    duplicate. SETUP_GUIDE invites hand-editing this file, so it is reachable.
+    """
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+
+    def _write(self, text):
+        with open(os.path.join(self.tmp, "accounts.json"), "w",
+                  encoding="utf-8") as f:
+            f.write(text)
+
+    def test_a_broken_file_does_not_read_as_configured(self):
+        self._write("{ this is not json")
+        s = ourcal.setup_status()
+        self.assertFalse(s["accountsFromFile"])
+        self.assertTrue(s["accountsFileBroken"])
+
+    def test_a_valid_file_reads_as_configured(self):
+        self._write(json.dumps([{"label": "Real", "email": "r@example.com"}]))
+        s = ourcal.setup_status()
+        self.assertTrue(s["accountsFromFile"])
+        self.assertFalse(s["accountsFileBroken"])
+
+    def test_no_file_at_all_is_neither(self):
+        s = ourcal.setup_status()
+        self.assertFalse(s["accountsFromFile"])
+        self.assertFalse(s["accountsFileBroken"])
+
+    def test_valid_json_that_fails_the_account_rules_is_broken_too(self):
+        # Parseable JSON, invalid as accounts — an empty list, which
+        # parse_accounts rejects. Same user-visible consequence.
+        self._write("[]")
+        s = ourcal.setup_status()
+        self.assertFalse(s["accountsFromFile"])
+        self.assertTrue(s["accountsFileBroken"])
+
+    def test_the_first_add_over_a_broken_file_is_not_refused(self):
+        # The reported bug: placeholders are in ACCOUNTS, so adding "Work"
+        # collided with a placeholder the user never added.
+        self._write("{ this is not json")
+        ourcal.ACCOUNTS = [{"label": "Personal", "email": "you@example.com"},
+                           {"label": "Work", "email": "you@work.example.com"}]
+        r = ourcal.add_account("Work", "me@gmail.com")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual([a["label"] for a in ourcal.ACCOUNTS], ["Work"])
+        with open(os.path.join(self.tmp, "accounts.json"),
+                  encoding="utf-8") as f:
+            self.assertEqual(json.load(f),
+                             [{"label": "Work", "email": "me@gmail.com"}])
 
 
 if __name__ == "__main__":
