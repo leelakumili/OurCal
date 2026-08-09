@@ -196,25 +196,20 @@ Exactly what it says — finish Steps 1–4 above and make sure the downloaded f
 is renamed to exactly `credentials.json` and sits next to `ourcal.py`. One
 banner per account is normal here; they all share the same cause.
 
-**An account shows `signed in as <X>, not <Y> — delete token_<label>.json`.**
+**An account shows `signed in as <X>, not <Y> — open Set up this device,
+remove <label>, add it again, and sign in as <Y>`.**
 A token file already exists for this account, but it was signed in as a
 different Google account than the one in `accounts.json`. OurCal refuses to
 use it rather than stamping that account's events with the wrong badge. This
 banner is plain text, not a link — unlike an "isn't signed in" banner, there
 is no **Sign in** button on it, so don't go looking for one there.
 
-The message says to "restart," but nothing actually needs restarting —
-tokens are read fresh on every refresh, not cached at startup, so either fix
-below takes effect on the next poll or **Refresh** click.
-
-- **On a computer:** delete the named `token_<label>.json`, then open
-  `/setup` and click that account's **Sign in** button, picking `<Y>` this
-  time.
-- **On the phone:** you can't reach that file directly (Android 11+ hides
-  it from every file manager, see "On Android" in the README), so tap
-  **Remove** for that account on `/setup` instead — it deletes the entry
-  *and* its token in one step. Add the account back with the same name and
-  email, then tap **Sign in** and pick `<Y>`.
+Nothing needs restarting — tokens are read fresh on every refresh, not cached
+at startup — and the message names the one remedy that works the same way on
+a computer and on the phone: open `/setup`, tap **Remove** for that account
+(one action deletes the entry *and* its token), add it back with the same
+name and the correct email, then tap **Sign in** and pick `<Y>` this time.
+The fix takes effect on the next poll or **Refresh** click.
 
 **Sign-in says `Signed in as <X>, not <Y> — tap Sign in again and pick <Y>`.**
 The on-device version of the message above: you picked the wrong account in

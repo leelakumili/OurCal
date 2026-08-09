@@ -738,12 +738,20 @@ def account_mismatch(label, expected, cals):
 
     Guards against signing in with the wrong Google account at a given prompt,
     which would otherwise file that account's events under this label.
+
+    The message names a remedy that exists on every platform. It used to name
+    token_path(label) and tell the reader to delete it and restart — on
+    Android that path is unreachable by construction (Android 11+ hides it
+    from every file manager and from MTP, which is the whole reason setup
+    exists as a pasted/on-device flow), and no restart is needed either way
+    since sign-in is a button, not something a relaunch triggers.
     """
     actual = primary_email(cals)
     if not actual or actual == (expected or "").strip().lower():
         return None
-    return (f"signed in as {actual}, not {expected} — delete "
-            f"{token_path(label)}, restart, and pick {expected}")
+    return (f"signed in as {actual}, not {expected} — open Set up this "
+            f"device, remove {label}, add it again, and sign in as "
+            f"{expected}")
 
 
 def _android_open_url(url):

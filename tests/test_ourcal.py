@@ -1378,12 +1378,19 @@ class TestAccountIdentity(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("personal@example.com", msg)        # who actually signed in
         self.assertIn("work@example.com", msg)    # who was expected
-        self.assertIn("token_work.json", msg)     # what to delete
+        self.assertIn("Set up this device", msg)  # the remedy that exists
 
-    def test_message_names_token_file_via_slug(self):
+    def test_message_names_a_remedy_reachable_on_every_platform(self):
+        # The message used to name token_path(label) and say "delete ... and
+        # restart" — unreachable on Android (Android 11+ hides that path from
+        # every file manager and from MTP) and unnecessary anywhere (sign-in
+        # is a button, not something a restart triggers). It must name the
+        # account to remove instead, and say nothing about restarting.
         cals = self._cals("fourth@example.com")
         msg = ourcal.account_mismatch("Third", "third@example.com", cals)
-        self.assertIn("token_third.json", msg)
+        self.assertIn("Third", msg)
+        self.assertNotIn("token_third.json", msg)
+        self.assertNotIn("restart", msg.lower())
 
     def test_mismatched_account_yields_no_events(self):
         # Wrong account must produce an error and zero events -- never events
