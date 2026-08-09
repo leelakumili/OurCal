@@ -84,9 +84,10 @@ download a Desktop OAuth client as `credentials.json`.
 
 Full walkthrough: **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.
 
-The Android build is the exception: it ships an OAuth client inside the APK,
-so a fresh install can add an account and sign in with no computer at all —
-see [On Android: sign in on the
+Building for Android is the exception: `packaging/build-android.sh` ships an
+OAuth client inside the APK when it finds `credentials.json` in the working
+tree, so that install can add an account and sign in with no computer at all
+once it's on the phone — see [On Android: sign in on the
 device](SETUP_GUIDE.md#on-android-sign-in-on-the-device). That doesn't change
 what you do here. `credentials.json` is an app identity, not an account key —
 it holds a client id and secret and no refresh token, and Google issues a
@@ -107,9 +108,10 @@ source.
 
 Two ways to get going on the phone.
 
-**If your build bundles an OAuth client** — an official APK, or your own
-build of `packaging/build-android.sh` with a `credentials.json` present —
-add an account and sign in right there, no computer needed. Full walkthrough:
+**If you built the APK yourself with `credentials.json` present** — there's
+no official Android release yet, see [Development](#development) —
+`packaging/build-android.sh` bundles the client for you, so you can add an
+account and sign in right on the phone, no computer needed. Full walkthrough:
 [On Android: sign in on the
 device](SETUP_GUIDE.md#on-android-sign-in-on-the-device).
 

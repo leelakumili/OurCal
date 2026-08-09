@@ -2,7 +2,9 @@
 
 OurCal unifies the calendars from all of your Google accounts into one
 dashboard and lets you create, edit, sync and delete events across any selection
-of them. Everything runs on your own Mac — nothing is uploaded anywhere.
+of them. Everything runs on your own device — nothing is uploaded anywhere.
+The steps below are for a Mac or a source checkout; Android has its own
+section further down.
 
 You can try the whole interface **right now, with zero setup**:
 
@@ -195,11 +197,24 @@ is renamed to exactly `credentials.json` and sits next to `ourcal.py`. One
 banner per account is normal here; they all share the same cause.
 
 **An account shows `signed in as <X>, not <Y> — delete token_<label>.json`.**
-This account already has a token file, but it was signed in as a different
-Google account than the one in `accounts.json`. OurCal refuses to use it
-rather than stamping that account's events with the wrong badge. Delete the
-named token file, then click that account's **Sign in** button again (from
-its banner, or on `/setup`) and pick `<Y>` this time.
+A token file already exists for this account, but it was signed in as a
+different Google account than the one in `accounts.json`. OurCal refuses to
+use it rather than stamping that account's events with the wrong badge. This
+banner is plain text, not a link — unlike an "isn't signed in" banner, there
+is no **Sign in** button on it, so don't go looking for one there.
+
+The message says to "restart," but nothing actually needs restarting —
+tokens are read fresh on every refresh, not cached at startup, so either fix
+below takes effect on the next poll or **Refresh** click.
+
+- **On a computer:** delete the named `token_<label>.json`, then open
+  `/setup` and click that account's **Sign in** button, picking `<Y>` this
+  time.
+- **On the phone:** you can't reach that file directly (Android 11+ hides
+  it from every file manager, see "On Android" in the README), so tap
+  **Remove** for that account on `/setup` instead — it deletes the entry
+  *and* its token in one step. Add the account back with the same name and
+  email, then tap **Sign in** and pick `<Y>`.
 
 **Sign-in says `Signed in as <X>, not <Y> — tap Sign in again and pick <Y>`.**
 The on-device version of the message above: you picked the wrong account in
