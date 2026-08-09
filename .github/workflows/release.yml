@@ -53,12 +53,31 @@ jobs:
 
       - name: Verify the built app actually starts
         # A .dmg that builds but does not launch is the failure this catches:
-        # nothing else in CI opens the bundle.
+        # nothing else in CI opens the bundle. It used to curl -sf a gated
+        # route (/api/events) with no token, which always exits 22 (measured:
+        # 22 with no token, 0 with it) — the app was building, launching and
+        # serving correctly, and this step failed every time anyway, blaming
+        # "did not serve" for a problem that was the check being wrong, not
+        # the build. Minting the real session token here to satisfy the gate
+        # is not an option either: it lives only inside the running process's
+        # memory, with no file or stdout line CI can read it from, and
+        # teaching this step to scrape it out of a page (the same trick
+        # closed as a vulnerability elsewhere in this app) would make CI
+        # depend on exactly the mechanism that hole was closed by removing.
+        # So this checks the one thing that does not require the token: that
+        # something is listening on 127.0.0.1:8756 and returns a real HTTP
+        # response at all. curl reports "000" for a connection that never
+        # completed (nothing bound the port, or the process crashed before
+        # accepting) and a real numeric status for anything else — 403
+        # included. A response, gated or not, is proof the server is up;
+        # that is everything this step is actually responsible for, since
+        # the test suite already covers the routes' real behaviour.
         run: |
           open -a "$PWD/dist/OurCal.app" --args --window
           for i in $(seq 1 20); do
-            if curl -sf --max-time 2 http://127.0.0.1:8756/api/events >/dev/null; then
-              echo "app is serving"; exit 0
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8756/ || true)
+            if [ "$code" != "000" ] && [ -n "$code" ]; then
+              echo "app is serving (http $code)"; exit 0
             fi
             sleep 1
           done
