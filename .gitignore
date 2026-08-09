@@ -6,3 +6,7 @@ __pycache__/
 .DS_Store
 dist/
 build/
+packaging/android/build/
+packaging/android/.build-venv/
+packaging/android/src/ourcal/core.py
+packaging/android/src/ourcal/resources/

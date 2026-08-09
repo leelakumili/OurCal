@@ -1,0 +1,33 @@
+# Briefcase config for the Android build ONLY. macOS keeps its own PyInstaller
+# pipeline (packaging/build-app.sh) — that ships already and there is nothing to
+# gain by rebuilding it here. One codebase, two packagers.
+#
+# ourcal.py is copied in verbatim as src/ourcal/core.py by build-android.sh;
+# the Toga wrapper (src/ourcal/app.py) just starts its server and shows it.
+[tool.briefcase]
+project_name = "OurCal"
+bundle = "com.leelakumili"
+version = "1.0.1"
+license = "MIT"
+
+[tool.briefcase.app.ourcal]
+formal_name = "OurCal"
+description = "A unified calendar dashboard for every Google account you own"
+long_description = """One agenda across all of your Google accounts, with
+create, edit, sync and delete written straight back to the source calendars.
+Runs entirely on your own device."""
+sources = ["src/ourcal"]
+requires = [
+    "google-api-python-client",
+    "google-auth-oauthlib",
+    # zoneinfo has no IANA database in the Android sandbox — the desktop relies
+    # on the OS copy, which is not reachable here. tzdata bundles it so
+    # ZoneInfo(TIMEZONE) resolves instead of raising ZoneInfoNotFoundError.
+    "tzdata",
+]
+
+[tool.briefcase.app.ourcal.android]
+requires = ["toga-android~=0.4.0"]
+# INTERNET is granted by default; nothing else is needed — no calendar
+# permission, no storage permission (data lives in the app's private internal
+# storage, getFilesDir(), which needs none — not the external files dir).

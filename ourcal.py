@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,28 +26,36 @@ def is_bundled():
 def is_android():
     """True when running inside the Android app.
 
-    Chaquopy — the runtime Briefcase uses — is importable only there, which
-    makes it a more honest probe than sniffing sys.platform (Android reports
-    itself as Linux).
+    Probes the interpreter, never the Java bridge. The previous version
+    imported `com.chaquo.python` and returned False on a real device: every
+    Android seam stayed dark and data_dir() fell through to APP_DIR. Any
+    CPython built for Android defines sys.getandroidapilevel, and reading an
+    attribute cannot fail the way importing a Java package can.
     """
+    import sys
+    if hasattr(sys, "getandroidapilevel"):
+        return True
     try:
         import com.chaquo.python  # noqa: F401
         return True
-    except ImportError:
+    except Exception:   # a present-but-unready bridge raises more than ImportError
         return False
 
 
 def android_data_dir():
-    """The app's own external files directory.
+    """The app's private internal files directory.
 
-    Chosen over internal storage because you have to be able to PUT
-    credentials.json there: this path shows up in any file manager under
-    Android/data/<package>/files, needs no permissions, and is removed when the
-    app is uninstalled — which is the right lifetime for OAuth tokens.
+    Internal, not external. This used to return getExternalFilesDir() so that
+    credentials.json could be dropped in with a file manager — but Android 11+
+    hides Android/data from every file manager and from MTP, so that was never
+    possible on a modern device, and it is the reason setup now arrives as a
+    pasted bundle. With nothing needing to reach this directory from outside,
+    private storage is strictly better: not world-readable, survives app
+    updates, removed on uninstall.
     """
     from com.chaquo.python import Python
     ctx = Python.getPlatform().getApplication()
-    return str(ctx.getExternalFilesDir(None).getAbsolutePath())
+    return str(ctx.getFilesDir().getAbsolutePath())
 
 
 def data_dir():
@@ -57,9 +67,21 @@ def data_dir():
     from a source checkout keeps using the checkout — that is where the setup
     guide tells people to drop credentials.json, and it keeps a clone
     self-contained.
+
+    android_data_dir() imports the Java bridge, and on the device that first
+    reported the platform-detection bug that import demonstrably failed for
+    reasons still unknown. Letting it raise here would turn that into a crash
+    at module import — ensure_data_dir() runs at import time — so the app
+    would never start and nobody would ever see the diagnostics footer built
+    to make failures like this visible. Falling through instead trades "wrong
+    directory" for "wrong directory, degraded" rather than "does not launch";
+    setup_status()'s `bridge` key reports the failure so it stays visible.
     """
     if is_android():
-        return android_data_dir()
+        try:
+            return android_data_dir()
+        except Exception:
+            pass    # bridge unavailable — fall through, and say so in setup_status
     return SUPPORT_DIR if is_bundled() else APP_DIR
 
 
@@ -80,6 +102,28 @@ def ensure_data_dir():
     if d != APP_DIR:
         os.makedirs(d, exist_ok=True)
     return d
+
+
+def write_secret_file(path, text):
+    """Write a credential file the way every credential file must be written.
+
+    Mode at creation, never chmod'd after, so there is no window in which a
+    refresh token is readable by anything else on the machine — and written to
+    a temp name then renamed, so a crash mid-write cannot leave truncated JSON
+    that later reads as a corrupt token with no way to recover.
+
+    Every writer of a secret file routes through this: write_user_files (the
+    bundle import path), creds_for's refresh write-back, and _run_signin's
+    token write. Before this helper existed, the last two used a plain
+    open(path, "w"), which on a default umask lands the file at 0644 — the
+    same refresh token ending up world-readable or owner-only depending
+    entirely on which of three code paths happened to write it last.
+    """
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 def slug(label):
@@ -129,9 +173,17 @@ def parse_accounts(raw):
 
 
 def load_accounts(path):
-    """accounts.json → account list, or None if absent, unreadable, or invalid."""
+    """accounts.json → account list, or None if absent, unreadable, or invalid.
+
+    Explicit encoding, not the platform default: write_user_files always
+    writes this file as UTF-8 (a label can be non-ASCII), and under a
+    non-UTF-8 locale a bare open() would raise UnicodeDecodeError — a
+    ValueError subclass — which the except below already catches, silently
+    returning None and leaving the placeholder accounts in place instead of
+    surfacing the import as broken.
+    """
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return parse_accounts(json.load(f))
     except (OSError, ValueError):
         return None
@@ -142,15 +194,47 @@ ensure_data_dir()
 ACCOUNTS = load_accounts(user_path("accounts.json")) or ACCOUNTS
 
 TIMEZONE = "America/Los_Angeles"
+
+_TZ = None
+
+
+def tz():
+    """The configured timezone, resolved once and cached.
+
+    ZoneInfo(TIMEZONE) works everywhere with a system tz database. Android has
+    none, and its bundled `tzdata` package is stored in an asset bundle that
+    zoneinfo's importlib.resources-based discovery cannot open — so the normal
+    constructor raises ZoneInfoNotFoundError there. The fallback reads the tz
+    bytes straight out of the tzdata package (pkgutil.get_data works against
+    Chaquopy's loader) and builds the zone from them directly.
+    """
+    global _TZ
+    if _TZ is None:
+        try:
+            _TZ = ZoneInfo(TIMEZONE)
+        except Exception:
+            import io
+            import pkgutil
+            raw = pkgutil.get_data("tzdata", "zoneinfo/" + TIMEZONE)
+            if not raw:
+                raise
+            _TZ = ZoneInfo.from_file(io.BytesIO(raw), key=TIMEZONE)
+    return _TZ
+
+
 DAYS_AHEAD = 30
 # A wider window costs proportionally more Google calls, so the ceiling exists
 # to stop a mistyped URL spending a minute of API time.
 MAX_DAYS_AHEAD = 730
 POLL_MINUTES = 5
 PORT = 8756
+# Minted per run and only ever present inside pages this server itself
+# served. Host and Origin constrain browsers; this constrains everything
+# else, including another app on the same Android device.
+SESSION_TOKEN = secrets.token_urlsafe(32)
 # Single source of truth for the version: the release workflow reads it from
 # here, so a tag can never disagree with what the app reports.
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # Colorblind-safe categorical palette (parallel light/dark arrays).
 PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
@@ -232,10 +316,10 @@ def _instant(s):
         # dates are naive too. Pin any naive instant to TIMEZONE so all events are
         # comparable (real Google dateTimes already carry an offset).
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo(TIMEZONE))
+            dt = dt.replace(tzinfo=tz())
         return dt
     except ValueError:
-        return datetime.max.replace(tzinfo=ZoneInfo(TIMEZONE))
+        return datetime.max.replace(tzinfo=tz())
 
 
 def _event_instant(e):
@@ -475,7 +559,7 @@ _DEMO_STORE = None
 def reset_demo(now=None):
     """(Re)seed the in-memory demo store. Used by tests and first demo read."""
     global _DEMO_STORE
-    now = now or datetime.now(ZoneInfo(TIMEZONE))
+    now = now or datetime.now(tz())
     _DEMO_STORE = _demo_fixtures(now)
 
 
@@ -497,7 +581,7 @@ def clamp_days(days):
 
 
 def get_events(now=None, days=None):
-    now = now or datetime.now(ZoneInfo(TIMEZONE))
+    now = now or datetime.now(tz())
     days = clamp_days(days)
     errors = []
     if is_demo():
@@ -654,12 +738,20 @@ def account_mismatch(label, expected, cals):
 
     Guards against signing in with the wrong Google account at a given prompt,
     which would otherwise file that account's events under this label.
+
+    The message names a remedy that exists on every platform. It used to name
+    token_path(label) and tell the reader to delete it and restart — on
+    Android that path is unreachable by construction (Android 11+ hides it
+    from every file manager and from MTP, which is the whole reason setup
+    exists as a pasted/on-device flow), and no restart is needed either way
+    since sign-in is a button, not something a relaunch triggers.
     """
     actual = primary_email(cals)
     if not actual or actual == (expected or "").strip().lower():
         return None
-    return (f"signed in as {actual}, not {expected} — delete "
-            f"{token_path(label)}, restart, and pick {expected}")
+    return (f"signed in as {actual}, not {expected} — open Set up this "
+            f"device, remove {label}, add it again, and sign in as "
+            f"{expected}")
 
 
 def _android_open_url(url):
@@ -701,7 +793,10 @@ def run_oauth_flow(flow):
     the app is foregrounded and has network again.
     """
     if not is_android():
-        return flow.run_local_server(port=0)
+        # Bounded like the Android branch: an abandoned browser tab must not
+        # leave the sign-in state stuck in "waiting" for the whole process,
+        # which would refuse every later sign-in for every account.
+        return flow.run_local_server(port=0, timeout_seconds=300)
 
     import webbrowser
     real_fetch = flow.fetch_token
@@ -718,11 +813,20 @@ def run_oauth_flow(flow):
                                  timeout_seconds=300)
 
 
+class NeedsSignIn(Exception):
+    """This account has no usable token and a human must sign in.
+
+    Raised rather than opening a browser: creds_for runs inside the
+    agenda request, and launching a browser there blocked that request
+    for up to 300 seconds per account, sequentially. Sign-in is an
+    explicit button now, on both platforms.
+    """
+
+
 def creds_for(label, email):
-    """Load/refresh creds for an account; run InstalledAppFlow if absent."""
+    """Load/refresh creds for an account; raise NeedsSignIn if absent."""
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
-    from google_auth_oauthlib.flow import InstalledAppFlow
     path = token_path(label)
     creds = None
     if os.path.exists(path):
@@ -732,20 +836,11 @@ def creds_for(label, email):
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     else:
-        cred_file = user_path("credentials.json")
-        if not os.path.exists(cred_file):
-            raise FileNotFoundError(
-                f"credentials.json is missing from {data_dir()} — "
-                "complete Steps 1-4 of SETUP_GUIDE.md")
-        # Name the account before the browser opens: the prompts are identical
-        # otherwise, and picking the wrong one silently mislabels its events.
-        print(f"\nOurCal: sign in as {email}   (account “{label}”)\n"
-              f"        Pick this exact account in the browser window.\n",
-              flush=True)
-        flow = InstalledAppFlow.from_client_secrets_file(cred_file, SCOPES)
-        creds = run_oauth_flow(flow)
-    with open(path, "w") as f:
-        f.write(creds.to_json())
+        client_config_text()      # raises FileNotFoundError if absent at all
+        raise NeedsSignIn(label)
+    # write_secret_file, not a plain open(): a refreshed token is exactly as
+    # sensitive as the one sign-in wrote and must land 0600 the same way.
+    write_secret_file(path, creds.to_json())
     return creds
 
 
@@ -756,7 +851,16 @@ def service_for(label, email):
 
 
 def list_account_events(label, email, time_min, time_max):
-    """Return (normalized_events, error_or_None) for one account."""
+    """Return (normalized_events, error_or_None) for one account.
+
+    The error, when present, is a dict {"message": str, "setup": bool,
+    "signin": bool} — not a bare string. "setup" is True only when the fix
+    is to complete setup (a missing credentials.json); "signin" is True
+    only when this one account simply has no token yet. It is False for a
+    dead token, a revoked grant, or a signed-in account that doesn't match
+    its label — none of those have a "redo setup" or "sign in" way out, so
+    the page must not offer one for them.
+    """
     try:
         svc = service_for(label, email)
         events = []
@@ -770,7 +874,8 @@ def list_account_events(label, email, time_min, time_max):
                 break
         mismatch = account_mismatch(label, email, cals)
         if mismatch:
-            return [], mismatch   # never file another account's events here
+            # never file another account's events here
+            return [], {"message": mismatch, "setup": False, "signin": False}
         for cal in cals:
             if not should_include_calendar(cal):
                 continue
@@ -788,10 +893,18 @@ def list_account_events(label, email, time_min, time_max):
                 if not page:
                     break
         return events, None
-    except FileNotFoundError as e:  # setup incomplete — "re-auth" would mislead
-        return [], str(e)
+    except NeedsSignIn:
+        # Setup is fine; this account simply has no token yet. Different
+        # fix, different button — so the page must be able to tell them
+        # apart without reading the message text.
+        return [], {"message": "not signed in", "setup": False, "signin": True}
+    except FileNotFoundError as e:
+        # Setup incomplete, not an auth failure: "re-auth" would mislead. The
+        # flag lets the page offer setup without string-matching this text.
+        return [], {"message": str(e), "setup": True, "signin": False}
     except Exception as e:  # per-account isolation
-        return [], f"{type(e).__name__} — re-auth or check access"
+        return [], {"message": f"{type(e).__name__} — re-auth or check access",
+                    "setup": False, "signin": False}
 
 
 def _google_collect(now, days=None):
@@ -802,7 +915,7 @@ def _google_collect(now, days=None):
         evs, err = list_account_events(a["label"], a["email"], time_min, time_max)
         all_events.extend(evs)
         if err:
-            errors.append({"label": a["label"], "message": err})
+            errors.append({"label": a["label"], **err})
     return merge_events(all_events), errors
 
 
@@ -913,6 +1026,719 @@ def _google_create(payload):
                 results.append({"label": t["label"], "ok": False,
                                 "error": str(e)})
     return {"ok": all(r["ok"] for r in results), "results": results}
+
+
+# ── TRANSFER ────────────────────────────────────────────────────────────
+# Moving a setup onto a phone. Android 11+ hides Android/data from every file
+# manager and from MTP, so a sideloaded app cannot be handed a file at all —
+# the setup crosses as one pasted, passphrase-encrypted string instead.
+BUNDLE_PREFIX = "ourcal1."
+_KDF_ROUNDS = 600000            # the OWASP figure for PBKDF2-HMAC-SHA256
+_SALT_LEN = 16
+_NONCE_LEN = 16
+_MAC_LEN = 32
+_TRUNCATED = "The bundle looks truncated — paste the whole thing."
+# The threat model assumes the ciphertext gets obtained — it routes through a
+# cloud clipboard, a drafts folder or a chat backup — at which point PBKDF2 is
+# the only defence left and a weak passphrase is the whole game. Four live
+# refresh tokens are worth more than "not empty".
+_MIN_PASSPHRASE_LEN = 12
+
+
+class BundleError(Exception):
+    """Anything wrong with a bundle. The message is shown to the user."""
+
+
+def _bundle_keys(passphrase, salt):
+    """Split one derived secret into an encryption key and a MAC key.
+
+    PBKDF2 rather than scrypt: scrypt is the better primitive, but its
+    availability depends on OpenSSL build flags that cannot be checked on
+    Chaquopy without the device. pbkdf2_hmac exists wherever hashlib does.
+    """
+    import hashlib
+    dk = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt,
+                             _KDF_ROUNDS, dklen=64)
+    return dk[:32], dk[32:]
+
+
+def _keystream(enc_key, nonce, length):
+    """HKDF-Expand shape: a keyed PRF in counter mode.
+
+    Not a vetted cipher, and deliberately so: the stdlib has no AES, and
+    adding `cryptography` would put a native wheel into an Android build that
+    has none and currently builds clean. Conservative construction, recorded
+    as an accepted risk in the design doc rather than left as an accident.
+    """
+    import hashlib
+    import hmac
+    out = bytearray()
+    counter = 0
+    while len(out) < length:
+        out += hmac.new(enc_key, nonce + counter.to_bytes(8, "big"),
+                        hashlib.sha256).digest()
+        counter += 1
+    return bytes(out[:length])
+
+
+def _xor(data, stream):
+    return bytes(a ^ b for a, b in zip(data, stream))
+
+
+def make_bundle(files, passphrase):
+    """Pack {name: contents} into one pasteable encrypted string."""
+    import base64
+    import gzip
+    import hashlib
+    import hmac
+    plain = gzip.compress(json.dumps({"v": 1, "files": files}).encode("utf-8"))
+    salt, nonce = os.urandom(_SALT_LEN), os.urandom(_NONCE_LEN)
+    enc_key, mac_key = _bundle_keys(passphrase, salt)
+    ct = _xor(plain, _keystream(enc_key, nonce, len(plain)))
+    mac = hmac.new(mac_key, b"ourcal1" + salt + nonce + ct,
+                   hashlib.sha256).digest()
+    raw = salt + nonce + ct + mac
+    return BUNDLE_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def open_bundle(bundle, passphrase):
+    """Unpack a bundle to {name: contents}. Raises BundleError."""
+    import base64
+    import gzip
+    import hashlib
+    import hmac
+    text = "".join((bundle or "").split())
+    if not text.startswith(BUNDLE_PREFIX):
+        raise BundleError("That doesn't look like an OurCal bundle.")
+    body = text[len(BUNDLE_PREFIX):]
+    try:
+        raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+    except Exception:
+        raise BundleError(_TRUNCATED)
+    if len(raw) <= _SALT_LEN + _NONCE_LEN + _MAC_LEN:
+        raise BundleError(_TRUNCATED)    # framing only, no ciphertext
+    salt = raw[:_SALT_LEN]
+    nonce = raw[_SALT_LEN:_SALT_LEN + _NONCE_LEN]
+    ct = raw[_SALT_LEN + _NONCE_LEN:-_MAC_LEN]
+    mac = raw[-_MAC_LEN:]
+    enc_key, mac_key = _bundle_keys(passphrase, salt)
+    expected = hmac.new(mac_key, b"ourcal1" + salt + nonce + ct,
+                        hashlib.sha256).digest()
+    # Encrypt-then-MAC: a wrong passphrase and a tampered bundle share one
+    # message, and neither reaches the decrypt path below.
+    if not hmac.compare_digest(mac, expected):
+        raise BundleError(
+            "Wrong passphrase, or the bundle was altered in transit.")
+    try:
+        payload = json.loads(gzip.decompress(
+            _xor(ct, _keystream(enc_key, nonce, len(ct)))).decode("utf-8"))
+        files = payload["files"]
+        if not isinstance(files, dict) or not all(
+                isinstance(k, str) and isinstance(v, str)
+                for k, v in files.items()):
+            raise ValueError("bad shape")
+    except Exception:
+        raise BundleError("The bundle is corrupt.")
+    return files
+
+
+_TOKEN_FILE_RE = re.compile(r"^token_[a-z0-9-]+\.json$")
+
+
+def is_user_file(name):
+    """Whether a bundle may write this name.
+
+    An exact whitelist, never sanitisation: os.path.join(data_dir(), name)
+    with a crafted name is a path traversal, and matching makes that
+    structurally impossible rather than defended against. The token pattern is
+    exactly what slug() produces.
+    """
+    return (name in ("credentials.json", "accounts.json")
+            or bool(_TOKEN_FILE_RE.match(name)))
+
+
+def reload_accounts():
+    """Re-read accounts.json into the module global.
+
+    ACCOUNTS resolves at import, so writing the file changes nothing until it
+    is re-read. get_events, _google_collect and _email_for all read the global
+    at call time, so reassignment is enough — no restart, and the placeholder
+    chips become the real accounts as soon as an import lands.
+    """
+    global ACCOUNTS
+    loaded = load_accounts(user_path("accounts.json"))
+    if loaded:
+        ACCOUNTS = loaded
+    return ACCOUNTS
+
+
+def write_user_files(files):
+    """Validate every entry, then write them all. Returns the names written.
+
+    All-or-nothing: nothing is written until everything has passed, so a bad
+    bundle cannot leave a half-configured device. The six renames are still
+    not one transaction — a disk failure part-way can leave a partial write —
+    but validate-first removes every failure mode short of that.
+    """
+    for name, body in sorted(files.items()):
+        if not is_user_file(name):
+            raise BundleError(f"Bundle contains an unexpected file: {name} — "
+                              "nothing was written.")
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            raise BundleError(f"{name} in the bundle is not valid JSON — "
+                              "nothing was written.")
+        if name == "accounts.json" and parse_accounts(parsed) is None:
+            raise BundleError("The accounts list in the bundle is invalid — "
+                              "nothing was written.")
+    d = ensure_data_dir()
+    written = []
+    for name, body in sorted(files.items()):
+        # write_secret_file: same 0600-at-creation, write-then-rename
+        # guarantee as every other credential file, not a second copy of it.
+        write_secret_file(os.path.join(d, name), body)
+        written.append(name)
+    return written
+
+
+def import_bundle(bundle, passphrase):
+    """Paste-in setup: decrypt, validate, write, reload. Raises BundleError."""
+    written = write_user_files(open_bundle(bundle, passphrase))
+    accounts = reload_accounts() if "accounts.json" in written else ACCOUNTS
+    return {"ok": True, "written": written, "accounts": len(accounts)}
+
+
+def collect_user_files():
+    """The whitelisted files present in data_dir(), as {name: contents}."""
+    d = data_dir()
+    out = {}
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for name in names:
+        if not is_user_file(name):
+            continue
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                out[name] = f.read()
+        except OSError:
+            pass
+    return out
+
+
+def export_cli():
+    """`./ourcal.py --export` — print a pasteable bundle of this setup.
+
+    Only the bundle goes to stdout, so `./ourcal.py --export | pbcopy` pipes
+    exactly the thing you paste: getpass prompts on the tty and every other
+    word goes to stderr.
+    """
+    import getpass
+    import sys
+    files = collect_user_files()
+    if "credentials.json" not in files:
+        print(f"OurCal: no credentials.json in {data_dir()} — nothing to "
+              "export.", file=sys.stderr)
+        return 1
+    first = getpass.getpass(
+        f"Passphrase for the bundle (at least {_MIN_PASSPHRASE_LEN} "
+        "characters): ")
+    if len(first) < _MIN_PASSPHRASE_LEN:
+        print(f"OurCal: a passphrase must be at least {_MIN_PASSPHRASE_LEN} "
+              "characters — nothing was written.", file=sys.stderr)
+        return 1
+    if first != getpass.getpass("Repeat it: "):
+        # A typo here would produce a bundle nobody can ever open.
+        print("OurCal: the two passphrases differ — nothing was written.",
+              file=sys.stderr)
+        return 1
+    print(f"OurCal: bundling {len(files)} file(s) from {data_dir()}.\n"
+          "        This carries live Google refresh tokens. It is encrypted, "
+          "but treat\n        it as a secret anyway.", file=sys.stderr)
+    print(make_bundle(files, first))
+    return 0
+
+
+def setup_status():
+    """What this install actually has — the setup page's diagnostics footer.
+
+    `dataDir` and `android` are here because their being wrong is exactly the
+    failure that went unnoticed for a month: nothing on the phone ever
+    reported which directory it had resolved. `bridge` reports whether
+    android_data_dir() is actually callable right now, independent of
+    `android` — so the footer can tell "android branch live" apart from
+    "android branch live but the Java bridge is unavailable", the exact
+    diagnosis someone will need if data_dir() ever has to fall back.
+
+    `hasCredentials` means a client is available from *somewhere* — pasted
+    or bundled — since sign-in works either way; `credentialsSource` tells
+    the footer which one, so a fresh install running on the bundled client
+    is never misreported as "credentials.json: missing" while sign-in is
+    working fine.
+    """
+    bridge = True
+    try:
+        android_data_dir()
+    except Exception:
+        bridge = False
+    pasted = os.path.exists(user_path("credentials.json"))
+    source = "pasted" if pasted else ("bundled" if bundled_credentials() else None)
+    return {
+        "dataDir": data_dir(),
+        "android": is_android(),
+        "bridge": bridge,
+        "hasCredentials": source is not None,
+        "credentialsSource": source,
+        "accounts": len(ACCOUNTS),
+        "accountsFromFile": os.path.exists(user_path("accounts.json")),
+        "accountLabels": [a["label"] for a in ACCOUNTS],
+        "signedIn": [a["label"] for a in ACCOUNTS
+                     if os.path.exists(token_path(a["label"]))],
+    }
+
+
+BUNDLED_CLIENT = "resources/bundled_credentials.json"
+
+
+def bundled_credentials():
+    """The OAuth client shipped inside the app, or None.
+
+    credentials.json is git-ignored and must stay that way, so it reaches
+    the APK from outside the repo — build-android.sh copies it in, and CI
+    writes it from a secret. An APK built without one still works; it is
+    simply paste-only, the same way build-app.sh degrades without a
+    signing identity.
+
+    pkgutil.get_data is tried first because it works against Chaquopy's
+    loader, which a plain path does not always reach; tz() relies on the
+    same mechanism for tzdata.
+    """
+    try:
+        import pkgutil
+        raw = pkgutil.get_data(__package__ or "ourcal", BUNDLED_CLIENT)
+        if raw:
+            return raw.decode("utf-8")
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(APP_DIR, BUNDLED_CLIENT), encoding="utf-8") as f:
+            return f.read()
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError: a corrupt bundled file must
+        # fall through to "no client available", not a raw traceback.
+        return None
+
+
+def client_config_text():
+    """The OAuth client this install should use.
+
+    A pasted credentials.json always wins over the bundled one, so anyone
+    who prefers their own Google Cloud project keeps working exactly as
+    before — the shipped client is a fallback, never an override.
+    """
+    path = user_path("credentials.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    bundled = bundled_credentials()
+    if bundled:
+        return bundled
+    raise FileNotFoundError(
+        f"credentials.json is missing from {data_dir()} — "
+        "complete Steps 1-4 of SETUP_GUIDE.md")
+
+
+SETUP_PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OurCal — set up this device</title>
+<style>
+  :root{--bg:#f5f6f8;--card:#fff;--text:#161a1d;--muted:#67717b;--border:#e4e7eb;
+        --accent:#2a78d6;--danger:#d64545;--ok:#1baf7a;color-scheme:light}
+  @media (prefers-color-scheme:dark){:root{--bg:#0f1419;--card:#171d24;
+        --text:#e6eaed;--muted:#98a2ac;--border:#29323b;--accent:#5b9cf0;
+        --danger:#f07a7a;--ok:#3fd39c;color-scheme:dark}}
+  *{box-sizing:border-box}html,body{margin:0}
+  body{background:var(--bg);color:var(--text);font-size:15px;line-height:1.45;
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:640px;margin:0 auto;padding:20px 16px 60px}
+  h1{font-size:20px;margin:0 0 4px;font-weight:750;letter-spacing:-.02em}
+  a{color:var(--accent)}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;
+        padding:14px;margin-bottom:14px}
+  label{display:block;font-size:13px;font-weight:600;margin:0 0 6px}
+  textarea,input{width:100%;font:inherit;padding:9px 11px;border-radius:9px;
+        border:1px solid var(--border);background:var(--bg);color:var(--text)}
+  textarea{min-height:120px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+        font-size:12px;resize:vertical;word-break:break-all}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+        background:var(--bg);border:1px solid var(--border);border-radius:6px;
+        padding:2px 5px}
+  button{font:inherit;cursor:pointer;border-radius:9px;padding:10px 16px;
+        border:1px solid var(--accent);background:var(--accent);color:#fff;
+        font-weight:600;margin-top:12px}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .msg{margin-top:12px;font-size:13px;padding:10px 12px;border-radius:9px;
+        border:1px solid var(--border);border-left:3px solid var(--muted)}
+  .msg.bad{border-left-color:var(--danger)}
+  .msg.good{border-left-color:var(--ok)}
+  .diag{color:var(--muted);font-size:12px;margin-top:18px;
+        font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+        word-break:break-all}
+</style>
+</head>
+<body><div class="wrap">
+  <h1>Set up this device</h1>
+  <div class="sub"><a href="/?k=__SESSION_TOKEN__">&larr; back to the agenda</a></div>
+
+  <div class="card">
+    <label>Accounts</label>
+    <div id="accts" style="font-size:13px;color:var(--muted)">loading&hellip;</div>
+    <label for="a-label" style="margin-top:12px">Add an account</label>
+    <input id="a-label" placeholder="Work" autocapitalize="words">
+    <input id="a-email" type="email" placeholder="you@gmail.com"
+           autocapitalize="off" autocorrect="off" style="margin-top:8px">
+    <button id="doAdd">Add</button>
+    <div id="acctMsg"></div>
+  </div>
+
+  <div class="card">
+    <label>1 &middot; On your computer</label>
+    <div style="font-size:13px;color:var(--muted)">
+      Run <code>./ourcal.py --export | pbcopy</code>, choose a passphrase, then
+      send yourself the bundle. It is encrypted, but it carries live Google
+      refresh tokens &mdash; treat it as a secret.
+    </div>
+  </div>
+
+  <div class="card">
+    <label for="bundle">2 &middot; Bundle</label>
+    <textarea id="bundle" placeholder="ourcal1&hellip;" spellcheck="false"
+              autocapitalize="off" autocorrect="off"></textarea>
+    <label for="passphrase" style="margin-top:12px">3 &middot; Passphrase</label>
+    <input id="passphrase" type="password" autocomplete="off">
+    <button id="doImport">Import</button>
+    <div id="result"></div>
+  </div>
+
+  <div class="diag" id="diag">checking this device&hellip;</div>
+</div>
+<script>
+const TOKEN = "__SESSION_TOKEN__";
+function api(path, opts){
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers || {},
+                               {"X-OurCal-Token": TOKEN});
+  return fetch(path, opts);
+}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>(
+  {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));}
+
+function diag(s){
+  var bridgeLine = "";
+  if(s.android && !s.bridge){
+    bridgeLine = "<br><b>android branch live, but the Java bridge is "
+      + "unavailable</b> — falling back, data dir may be wrong";
+  }
+  var credLine = s.credentialsSource === "bundled" ? "bundled with the app"
+    : s.credentialsSource === "pasted" ? "pasted in" : "missing";
+  document.getElementById("diag").innerHTML =
+    "data dir: " + esc(s.dataDir) + "<br>" +
+    "android branch: " + (s.android ? "live" : "not active") + bridgeLine + "<br>" +
+    "credentials: " + credLine + "<br>" +
+    "accounts: " + s.accounts + (s.accountsFromFile ? "" : " (placeholders)") +
+    "<br>signed in: " + (s.signedIn.length ? esc(s.signedIn.join(", ")) : "none");
+  renderAccounts(s);
+}
+
+function renderAccounts(s){
+  const box = document.getElementById("accts");
+  // accountLabels/accounts are the placeholders (Personal/you@example.com,
+  // Work/you@work.example.com) until accounts.json exists — listing them as
+  // if real, with working Remove/Sign in buttons, is what made a stranger's
+  // first "Add" collide with a placeholder of the same name. Fresh install:
+  // say so and stop, instead of rendering accounts nobody added.
+  if(!s.accountsFromFile){ box.textContent = "No accounts yet — add one below."; return; }
+  box.innerHTML = (s.accountLabels || []).map(function(l){
+    const on = (s.signedIn || []).indexOf(l) >= 0;
+    // Sign in is always offered, not just while `on` is false: a revoked
+    // grant or a dead token leaves the file present (so signedIn stays
+    // true) with no way to recover if the button disappears once it's ever
+    // been true.
+    return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">'
+      + '<span style="flex:1">' + esc(l) + '</span>'
+      + '<span>' + (on ? "✓ signed in" : "not signed in") + '</span>'
+      + '<button class="rm" data-label="' + esc(l) + '"'
+      + ' style="padding:4px 8px;font-size:12px">Remove</button>'
+      + '<button class="si" data-label="' + esc(l) + '"'
+      + ' style="padding:4px 8px;font-size:12px">'
+      + (on ? "Sign in again" : "Sign in") + '</button>'
+      + '</div>';
+  }).join("");
+  box.querySelectorAll(".rm").forEach(function(b){
+    b.onclick = function(){
+      api("/api/accounts/remove", {method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({label: b.dataset.label})})
+        .then(r=>r.json()).then(function(d){
+          document.getElementById("acctMsg").className = d.ok ? "msg good" : "msg bad";
+          document.getElementById("acctMsg").textContent = d.ok
+            ? "Removed." : (d.error || "Could not remove.");
+          refresh();
+        });
+    };
+  });
+  box.querySelectorAll(".si").forEach(function(b){
+    b.onclick = function(){
+      const out = document.getElementById("acctMsg");
+      out.className = "msg";
+      out.textContent = "Opening Google… finish there, then come back "
+                      + "to this app.";
+      api("/api/signin", {method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({label: b.dataset.label})})
+        .then(r=>r.json()).then(function(d){
+          if(!d.ok){ out.className = "msg bad"; out.textContent = d.error; return; }
+          const poll = setInterval(function(){
+            api("/api/signin/status").then(r=>r.json()).then(function(s){
+              if(s.state === "waiting") return;
+              clearInterval(poll);
+              out.className = s.state === "done" ? "msg good" : "msg bad";
+              out.textContent = s.state === "done"
+                ? "Signed in." : (s.message || "Sign-in failed.");
+              refresh();
+            });
+          }, 1500);
+        });
+    };
+  });
+}
+
+document.getElementById("doAdd").onclick = function(){
+  const out = document.getElementById("acctMsg");
+  api("/api/accounts", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({label: document.getElementById("a-label").value,
+                            email: document.getElementById("a-email").value})})
+    .then(r=>r.json()).then(function(d){
+      out.className = d.ok ? "msg good" : "msg bad";
+      out.textContent = d.ok ? "Added." : (d.error || "Could not add.");
+      if(d.ok){ document.getElementById("a-label").value = "";
+                document.getElementById("a-email").value = ""; }
+      refresh();
+    });
+};
+
+function refresh(){
+  api("/api/status").then(r=>r.json()).then(diag)
+    .catch(e=>{document.getElementById("diag").textContent =
+      "could not read device status: " + e;});
+}
+
+document.getElementById("doImport").onclick = function(){
+  const btn = this, out = document.getElementById("result");
+  btn.disabled = true;
+  out.className = "msg";
+  out.textContent = "Importing… this takes a moment (the passphrase is "
+                  + "deliberately slow to check).";
+  api("/api/import", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        bundle: document.getElementById("bundle").value,
+        passphrase: document.getElementById("passphrase").value})})
+    .then(r=>r.json())
+    .then(function(d){
+      btn.disabled = false;
+      if(d.ok){
+        out.className = "msg good";
+        out.innerHTML = "Imported " + d.written.length + " file(s): "
+          + esc(d.written.join(", ")) + ".<br>" + d.accounts
+          + " account(s) configured. <a href=\"/?k=__SESSION_TOKEN__\">Open the agenda</a>.";
+        document.getElementById("bundle").value = "";
+        document.getElementById("passphrase").value = "";
+      } else {
+        out.className = "msg bad";
+        out.textContent = d.error || "Import failed.";
+      }
+      refresh();
+    })
+    .catch(function(e){
+      btn.disabled = false;
+      out.className = "msg bad";
+      out.textContent = "Import failed: " + e;
+    });
+};
+
+refresh();
+</script>
+</body></html>"""
+
+
+def import_endpoint(payload):
+    """POST /api/import. A bad bundle is a normal answer, not a 500."""
+    try:
+        return import_bundle(payload.get("bundle", ""),
+                             payload.get("passphrase", ""))
+    except BundleError as e:
+        return {"ok": False, "error": str(e)}
+
+
+def add_account(label, email):
+    """Append an account and reload. Validation is parse_accounts'.
+
+    The whole list is validated, not just the new entry, because the rules
+    that matter are relational: a label that collides after slugging would
+    silently share another account's token file.
+
+    Seeded from `[]`, not ACCOUNTS, when accounts.json does not exist yet.
+    ACCOUNTS holds the Personal/Work placeholders before a first real
+    account is added, and Work is the exact label the design's own mock-up
+    uses — appending to the placeholders made a stranger's first "Add"
+    collide with a placeholder they never added ("That account is invalid or
+    already added"), and a non-colliding label would have materialised both
+    placeholders into a real accounts.json. The first real account must
+    replace the placeholders, not join them.
+    """
+    label, email = str(label or "").strip(), str(email or "").strip()
+    base = ACCOUNTS if os.path.exists(user_path("accounts.json")) else []
+    proposed = [dict(a) for a in base] + [{"label": label, "email": email}]
+    if parse_accounts(proposed) is None:
+        return {"ok": False,
+                "error": "That account is invalid or already added."}
+    write_user_files({"accounts.json": json.dumps(proposed, indent=2)})
+    reload_accounts()
+    return {"ok": True, "accounts": len(ACCOUNTS)}
+
+
+def remove_account(label):
+    """Remove an account and delete its token file.
+
+    One action, not two: an account you removed must not leave a live
+    refresh token sitting on the device.
+    """
+    remaining = [dict(a) for a in ACCOUNTS if a["label"] != label]
+    if len(remaining) == len(ACCOUNTS):
+        return {"ok": False, "error": f"No account named {label}."}
+    if not remaining:
+        # parse_accounts rejects an empty list, so load_accounts would
+        # return None and `or ACCOUNTS` would restore the placeholders —
+        # the app would show two accounts nobody added.
+        return {"ok": False,
+                "error": "OurCal needs at least one account — "
+                         "add the replacement first."}
+    write_user_files({"accounts.json": json.dumps(remaining, indent=2)})
+    try:
+        os.remove(token_path(label))
+    except OSError:
+        pass          # never signed in, or already gone
+    reload_accounts()
+    return {"ok": True, "accounts": len(ACCOUNTS)}
+
+
+def accounts_endpoint(payload):
+    """POST /api/accounts — add an account."""
+    return add_account(payload.get("label", ""), payload.get("email", ""))
+
+
+def accounts_remove_endpoint(payload):
+    """POST /api/accounts/remove — remove one, and its token."""
+    return remove_account(payload.get("label", ""))
+
+
+# One sign-in at a time: run_local_server binds a port, and the user can
+# only be in one browser flow.
+_SIGNIN = {"label": None, "state": "idle", "message": ""}
+_SIGNIN_LOCK = threading.Lock()
+
+
+def _run_signin(label, email):
+    """Complete one OAuth flow and write its token. Blocking; own thread.
+
+    Split out so tests can replace it without faking Google. The Android
+    specifics — the browser Intent and waiting for DNS to come back after
+    the trip to Chrome — already live in run_oauth_flow.
+
+    The signed-in account is checked before the token is written. Google's
+    prompts are identical apart from the address, so picking the wrong one
+    is easy; writing first and detecting later would leave a token filed
+    under someone else's label and report it as success.
+    """
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build
+    flow = InstalledAppFlow.from_client_config(
+        json.loads(client_config_text()), SCOPES)
+    creds = run_oauth_flow(flow)
+    svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    # Paginated, like list_account_events's identical loop: an unpaginated
+    # call only ever saw page 1, so an account whose primary calendar fell on
+    # a later page made primary_email() return "" and silently skipped the
+    # mismatch check below — the exact check this whole flow exists to run.
+    # That fails open, not closed.
+    cals = []
+    page_token = None
+    while True:
+        resp = svc.calendarList().list(pageToken=page_token).execute()
+        cals.extend(resp.get("items", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    actual = primary_email(cals)
+    if actual and actual != (email or "").strip().lower():
+        raise RuntimeError(
+            f"Signed in as {actual}, not {email} — tap Sign in again and "
+            f"pick {email}.")
+    write_secret_file(token_path(label), creds.to_json())
+
+
+def start_signin(label):
+    """Begin a sign-in on a background thread and return immediately."""
+    email = _email_for(label)
+    if email is None:
+        return {"ok": False, "error": f"No account named {label}."}
+    with _SIGNIN_LOCK:
+        if _SIGNIN["state"] == "waiting":
+            return {"ok": False,
+                    "error": "Another sign-in is already running — "
+                             "finish it first."}
+        _SIGNIN.update({"label": label, "state": "waiting", "message": ""})
+
+    def work():
+        try:
+            _run_signin(label, email)
+            _SIGNIN.update({"state": "done", "message": ""})
+        except Exception as e:
+            text = str(e)
+            low = text.lower()
+            if "timed out" in low or "timeout" in low:
+                text = "Timed out waiting for Google — tap Sign in again."
+            elif "name or service not known" in low or "getaddrinfo" in low \
+                    or "no address associated" in low \
+                    or "nodename nor servname provided" in low:
+                # The fourth clause is macOS's own wording for the same DNS
+                # failure the other three catch on Linux/glibc and elsewhere.
+                # The .dmg is this project's primary distribution today, so
+                # macOS is the platform where the raw OSError actually reaches
+                # a user; requests may wrap it, so this matches on the inner
+                # text via str(e) rather than the exception type.
+                text = ("Couldn't reach Google — check your connection and "
+                        "try again.")
+            _SIGNIN.update({"state": "error", "message": text})
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True}
+
+
+def signin_status():
+    return dict(_SIGNIN)
+
+
+def signin_endpoint(payload):
+    return start_signin(payload.get("label", ""))
 
 
 # ── HTML ────────────────────────────────────────────────────────────────
@@ -1051,6 +1877,9 @@ PAGE = r"""<!doctype html>
   <div class="chips" id="chips"></div>
   <div id="banner"></div>
   <div id="agenda"></div>
+  <div style="text-align:center;margin-top:28px;font-size:12px">
+    <a class="setup-link" href="/setup?k=__SESSION_TOKEN__" style="color:var(--muted)">Set up this device</a>
+  </div>
 </div>
 
 <div class="modal" id="modal">
@@ -1137,6 +1966,13 @@ PAGE = r"""<!doctype html>
 
 <script>
 const POLL_MS = __POLL_MS__;
+const TOKEN = "__SESSION_TOKEN__";
+function api(path, opts){
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers || {},
+                               {"X-OurCal-Token": TOKEN});
+  return fetch(path, opts);
+}
 const PAL_LIGHT = ["#2a78d6","#eb6834","#1baf7a","#eda100","#e87ba4"];
 const PAL_DARK  = ["#5b9cf0","#ff8a5c","#3fd39c","#ffc23d","#ff9ec4"];
 let DATA = null;
@@ -1234,7 +2070,15 @@ function render(){
   chips.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{ const l=c.getAttribute("data-label"); hidden.has(l)?hidden.delete(l):hidden.add(l); render(); });
 
   const banner=document.getElementById("banner");
-  banner.innerHTML=(DATA.errors&&DATA.errors.length)?DATA.errors.map(e=>`<div class="banner">⚠️ Couldn't refresh <b>${esc(e.label)}</b> — ${esc(e.message)}</div>`).join(""):"";
+  const errs=DATA.errors||[];
+  // Every account failing for the same missing credentials.json is one
+  // problem with one fix, not N problems. Any other mix keeps the
+  // per-account banners: an expired token must not hide behind "not set up".
+  banner.innerHTML = (errs.length && errs.every(e=>e.setup))
+    ? `<div class="banner">⚠️ OurCal isn't set up on this device yet. <a class="setup-link" href="/setup?k=__SESSION_TOKEN__" style="color:var(--accent)">Set up this device</a></div>`
+    : errs.map(e=>`<div class="banner">⚠️ ${e.signin
+        ? `<b>${esc(e.label)}</b> isn't signed in. <a class="setup-link" href="/setup?k=__SESSION_TOKEN__" style="color:var(--accent)">Sign in</a>`
+        : `Couldn't refresh <b>${esc(e.label)}</b> — ${esc(e.message)}`}</div>`).join("");
 
   const box=document.getElementById("agenda");
   const evs=DATA.events.filter(visible);
@@ -1289,8 +2133,13 @@ function evRow(ev,idx){
 
 function rangeDays(){ return localStorage.getItem("ourcal-days") || "30"; }
 function load(){
-  fetch("/api/events?days="+encodeURIComponent(rangeDays())).then(r=>r.json()).then(d=>{ DATA=d; render(); })
-    .catch(()=>{ document.getElementById("banner").innerHTML='<div class="banner">⚠️ Could not reach the OurCal server.</div>'; });
+  api("/api/events?days="+encodeURIComponent(rangeDays()))
+    .then(r=>r.text().then(t=>{ if(!r.ok) throw new Error("HTTP "+r.status+": "+t.slice(0,300)); return JSON.parse(t); }))
+    .then(d=>{ DATA=d; render(); })
+    // Surface the actual reason, not a generic "could not reach". A fetch that
+    // never leaves the page (network) and a server 500 look identical to the
+    // user otherwise, and they need opposite fixes.
+    .catch(e=>{ document.getElementById("banner").innerHTML='<div class="banner">⚠️ '+esc(String(e&&e.message||e))+'</div>'; });
 }
 
 /* theme */
@@ -1447,7 +2296,7 @@ function submitDelete(){
   const ser=document.getElementById("scope-ser");
   const scope=(ser&&ser.checked)?"series":"occurrence";
   const btn=document.getElementById("delConfirmBtn"); btn.disabled=true;
-  fetch("/api/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({scope,sources:chosen})})
+  api("/api/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({scope,sources:chosen})})
     .then(r=>r.json()).then(res=>{
       const ok=(res.results||[]).filter(x=>x.ok).map(x=>x.label);
       const bad=(res.results||[]).filter(x=>!x.ok).map(x=>x.label);
@@ -1522,7 +2371,7 @@ function submitEdit(){
     location:now.location, notes:now.notes, changed:changed,
     scope:(ser&&ser.checked)?"series":"occurrence", sources:chosen};
   const btn=document.getElementById("editSaveBtn"); btn.disabled=true;
-  fetch("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+  api("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
     .then(r=>r.json()).then(res=>{
       if(res.error){ toast(res.error,true); return; }
       const ok=(res.results||[]).filter(x=>x.ok).map(x=>x.label);
@@ -1577,7 +2426,7 @@ function submit(){
     payload.inviteFrom=(hv && payload.targets.some(t=>t.label===hv))?hv:payload.targets[0].label;
   }
   document.getElementById("createBtn").disabled=true;
-  fetch("/api/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+  api("/api/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
     .then(r=>r.json()).then(res=>{
       const ok=(res.results||[]).filter(x=>x.ok).map(x=>x.label);
       const bad=(res.results||[]).filter(x=>!x.ok).map(x=>x.label);
@@ -1629,19 +2478,117 @@ class OurCalHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        # Blocks a hostile page from iframing the UI: without this, the
+        # framed page's own fetches carry a valid Origin and would sail
+        # through _local_caller's check.
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(data)
 
+    def _local_caller(self):
+        """Whether this request looks like this device's own UI — not proof.
+
+        Two checks, two different browser-shaped holes:
+
+        - Host must be a loopback name. This defeats DNS rebinding: a
+          hostname that later resolves to 127.0.0.1 still sends its own
+          Host header in the request, never "127.0.0.1" or "localhost".
+        - Origin, when present, must be http://127.0.0.1:* or
+          http://localhost:*. This defeats a cross-origin browser POST: a
+          page on any other site can still fire the request (text/plain is
+          CORS-safelisted, so there is no preflight to block it), but the
+          Origin header the browser attaches to it gets rejected here.
+
+        Neither check does anything about a caller that isn't a browser. A
+        native process sends no Origin header at all, and `origin is None`
+        is accepted — that is what lets this app's own page (and every
+        script using urllib) through. On Android, where loopback is not
+        isolated between apps, that same gap means any other app installed
+        on the device can still POST to /api/import with no Origin and no
+        preflight in its way, and write attacker-controlled credentials.json
+        to this app's data directory; this was demonstrated against a live
+        server. Closing that needs something a browser page cannot forge and
+        a stranger's process cannot construct without already having it: a
+        per-session token minted at startup, required as a header on every
+        /api/* request and, since / and /setup are how that token's value
+        ever reaches a legitimate caller in the first place, as a ?k= query
+        parameter on those two pages themselves — see _api_token_ok, which
+        closes that hole. This method only closes the two browser-shaped
+        holes above.
+        """
+        host = (self.headers.get("Host") or "").split(":")[0]
+        if host not in ("127.0.0.1", "localhost", "[::1]", "::1"):
+            return False
+        origin = self.headers.get("Origin")
+        return origin is None or origin.startswith(
+            ("http://127.0.0.1:", "http://localhost:"))
+
+    def _api_token_ok(self):
+        """Whether this request carries this run's session token.
+
+        _local_caller closes the two browser-shaped holes; this closes the
+        one it cannot. A native caller on the same device sends no Origin
+        and passes that check, which on Android meant any installed app
+        could POST credentials into this app's data directory.
+
+        This does NOT rest on the token being unguessable by an attacker who
+        never sees it — an earlier version of this docstring claimed exactly
+        that and was wrong: a native caller that could fetch `/` or `/setup`
+        with no token requirement at all could simply read the token back out
+        of the HTML those pages carried, then replay it against every
+        `/api/*` route. That was demonstrated live. Both navigations are now
+        gated by the same token, passed as `?k=` rather than a header,
+        because a header is not something a page load can attach to itself.
+
+        The token reaches the real UI only because this process controls the
+        one URL that opens it: `start_server()` mints `SESSION_TOKEN` and
+        bakes it into the URL handed to the in-process view (WKWebView on
+        macOS, Toga's WebView on Android) and into every in-page link between
+        `/` and `/setup`. A caller that never sees that URL — including a
+        user who hand-types `http://127.0.0.1:8756/` instead of using the
+        URL the app itself opened — has no way to construct it and gets 403,
+        same as any other unauthenticated request. That is the actual
+        guarantee: not secrecy of an opaque string, but that nothing reaches
+        either page or any `/api/*` route without the key this run minted.
+        """
+        path, _, query = self.path.partition("?")
+        if path in ("/", "/setup"):
+            from urllib.parse import parse_qs
+            key = (parse_qs(query).get("k") or [""])[0]
+            # compare_digest raises TypeError for a str with non-ASCII
+            # characters instead of returning False — encoding both sides
+            # to bytes first makes a non-ASCII key just another wrong key
+            # (403), not a 500 that echoes interpreter internals.
+            return secrets.compare_digest(
+                key.encode("utf-8", "surrogateescape"), SESSION_TOKEN.encode())
+        return secrets.compare_digest(
+            self.headers.get("X-OurCal-Token") or "", SESSION_TOKEN)
+
     def do_GET(self):
         try:
+            if not self._local_caller():
+                self._send(403, json.dumps({"error": "forbidden"}))
+                return
+            if not self._api_token_ok():
+                self._send(403, json.dumps({"error": "forbidden"}))
+                return
             if self.path == "/" or self.path.startswith("/?"):
-                html = PAGE.replace("__POLL_MS__", str(POLL_MINUTES * 60000))
+                html = (PAGE.replace("__POLL_MS__", str(POLL_MINUTES * 60000))
+                            .replace("__SESSION_TOKEN__", SESSION_TOKEN))
                 self._send(200, html, "text/html; charset=utf-8")
             elif self.path.split("?")[0] == "/api/events":
                 from urllib.parse import parse_qs, urlparse
                 q = parse_qs(urlparse(self.path).query)
                 self._send(200, json.dumps(
                     get_events(days=(q.get("days") or [None])[0])))
+            elif self.path == "/setup" or self.path.startswith("/setup?"):
+                self._send(200,
+                           SETUP_PAGE.replace("__SESSION_TOKEN__", SESSION_TOKEN),
+                           "text/html; charset=utf-8")
+            elif self.path == "/api/status":
+                self._send(200, json.dumps(setup_status()))
+            elif self.path == "/api/signin/status":
+                self._send(200, json.dumps(signin_status()))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception as e:
@@ -1649,8 +2596,17 @@ class OurCalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            if not self._local_caller():
+                self._send(403, json.dumps({"error": "forbidden"}))
+                return
+            if not self._api_token_ok():
+                self._send(403, json.dumps({"error": "forbidden"}))
+                return
             routes = {"/api/create": create_event, "/api/delete": delete_events,
-                      "/api/update": update_events}
+                      "/api/update": update_events, "/api/import": import_endpoint,
+                      "/api/accounts": accounts_endpoint,
+                      "/api/accounts/remove": accounts_remove_endpoint,
+                      "/api/signin": signin_endpoint}
             handler = routes.get(self.path)
             if handler is None:
                 self._send(404, json.dumps({"error": "not found"}))
@@ -1673,6 +2629,11 @@ def start_server():
     run can print advice and let you fix it, but a double-clicked .app has no
     terminal to print to — refusing to start there just looks like an icon that
     does nothing. Any port beats no window.
+
+    The URL carries `?k=SESSION_TOKEN`: `/` and `/setup` require the token
+    exactly like `/api/*` does (see `_api_token_ok`), so this is the only way
+    the in-process view — or a script printing the URL — ever reaches either
+    page.
     """
     import threading
     try:
@@ -1681,7 +2642,7 @@ def start_server():
         server = make_server(0)     # 0 → the OS picks a free port
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, f"http://127.0.0.1:{port}"
+    return server, f"http://127.0.0.1:{port}/?k={SESSION_TOKEN}"
 
 
 def run_app_window():
@@ -1728,9 +2689,18 @@ def run_app_window():
 
 def run_server():
     server, url = start_server()
-    if not url.endswith(str(PORT)):
+    # Compare the bound port, not the URL's suffix: the URL now ends in
+    # "?k=<token>", not the port number, since start_server() bakes the
+    # session key into it.
+    if server.server_address[1] != PORT:
         print(f"OurCal: port {PORT} was busy, using {url} instead.")
     print(f"OurCal running at {url}  (Ctrl-C to stop)")
+    # Open the browser here, not from OurCal.command: this is the only place
+    # that has the real URL, ?k=<SESSION_TOKEN> included. A launcher script
+    # that opens a browser itself has no way to know the port (it can move)
+    # or the per-run key (it can't), and would land the user on a 403.
+    import webbrowser
+    webbrowser.open(url)
     try:
         while True:
             time.sleep(3600)
@@ -1810,6 +2780,11 @@ def want_window():
 
 
 def main():
+    import sys
+    if "--export" in sys.argv:
+        # Before ensure_deps(): export is stdlib-only and must work on a
+        # machine where the Google libraries are missing or broken.
+        raise SystemExit(export_cli())
     if not is_demo():
         ensure_deps()
     if want_window():

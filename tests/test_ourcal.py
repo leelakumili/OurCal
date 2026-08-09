@@ -1,4 +1,4 @@
-import copy, datetime, json, os, unittest
+import copy, datetime, json, os, re, time, unittest
 from zoneinfo import ZoneInfo
 os.environ.setdefault("OURCAL_DEMO", "1")  # keep imports side-effect free / no google
 import ourcal
@@ -1378,12 +1378,19 @@ class TestAccountIdentity(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("personal@example.com", msg)        # who actually signed in
         self.assertIn("work@example.com", msg)    # who was expected
-        self.assertIn("token_work.json", msg)     # what to delete
+        self.assertIn("Set up this device", msg)  # the remedy that exists
 
-    def test_message_names_token_file_via_slug(self):
+    def test_message_names_a_remedy_reachable_on_every_platform(self):
+        # The message used to name token_path(label) and say "delete ... and
+        # restart" — unreachable on Android (Android 11+ hides that path from
+        # every file manager and from MTP) and unnecessary anywhere (sign-in
+        # is a button, not something a restart triggers). It must name the
+        # account to remove instead, and say nothing about restarting.
         cals = self._cals("fourth@example.com")
         msg = ourcal.account_mismatch("Third", "third@example.com", cals)
-        self.assertIn("token_third.json", msg)
+        self.assertIn("Third", msg)
+        self.assertNotIn("token_third.json", msg)
+        self.assertNotIn("restart", msg.lower())
 
     def test_mismatched_account_yields_no_events(self):
         # Wrong account must produce an error and zero events -- never events
@@ -1411,19 +1418,27 @@ class TestHttp(unittest.TestCase):
         cls.server.shutdown()
 
     def _get(self, path):
-        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}") as r:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
             return r.status, r.read().decode()
 
     def _post(self, path, obj):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}{path}",
             data=json.dumps(obj).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
         with urllib.request.urlopen(req) as r:
             return r.status, json.loads(r.read().decode())
 
     def test_root_serves_ourcal_html(self):
-        status, body = self._get("/")
+        # "/" requires the session key as a ?k= query parameter, not the
+        # X-OurCal-Token header _get sends — a header is not something a
+        # page navigation can attach to itself.
+        status, body = self._get(f"/?k={ourcal.SESSION_TOKEN}")
         self.assertEqual(status, 200)
         self.assertIn("OurCal", body)
         self.assertNotIn("__POLL_MS__", body)  # placeholder substituted
@@ -1454,6 +1469,138 @@ class TestHttp(unittest.TestCase):
         self.assertTrue(r3["ok"])
 
 
+class _TmpData:
+    """Point data_dir() at a throwaway directory.
+
+    CONTRIBUTING.md:49 — never point tests at real credentials. In a checkout
+    data_dir() is APP_DIR, the repo itself, where the developer's real
+    credentials.json, accounts.json and token files live. A test that writes
+    without redirecting would overwrite them.
+    """
+
+    def _tmp_data(self):
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real = ourcal.data_dir
+        ourcal.data_dir = lambda: tmp
+        self.addCleanup(lambda: setattr(ourcal, "data_dir", real))
+        return tmp
+
+
+class TestCallerAuth(_TmpData, unittest.TestCase):
+    """/api/import writes OAuth credentials to disk and, before this guard,
+    validated nothing about who asked. text/plain is CORS-safelisted, so a
+    cross-origin fetch from any page the user visits is a simple request: no
+    preflight, the request is delivered and processed, and only the response
+    is unreadable — _local_caller's Origin check closes that hole, and its
+    Host check closes DNS rebinding via a forged Host header, for every
+    route at once.
+
+    Neither check closes the non-browser hole. A native caller sends no
+    Origin header, and the guard accepts `origin is None` — that is exactly
+    what lets this app's own page, and every urllib-based test in this
+    suite, through. On Android, where loopback is not isolated between
+    apps, that same gap means any other app installed on the device can
+    still drive /api/import with no Origin and no preflight to stop it.
+    That hole is closed separately, by _api_token_ok's per-session token —
+    this class is scoped to _local_caller's two browser-shaped checks, so
+    every request built here (via _req) carries a valid token already, and
+    only Origin/Host vary. See TestSessionToken for the token guard itself."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["OURCAL_DEMO"] = "1"
+        cls.server = ourcal.make_server(0)
+        cls.port = cls.server.server_address[1]
+        cls.t = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.t.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        # Every route in this class is exercised over real HTTP, and the
+        # guard being tested is exactly the thing that is supposed to stand
+        # between an unauthenticated caller and the owner's real
+        # credentials.json/accounts.json/token files. Relying on the guard
+        # to 403 before any real file is touched is the same "safe because
+        # something else fires first" reasoning that was rejected for
+        # TestSetupRoutes — redirect data_dir() per test here too, so a
+        # guard regression (or a future test added to this class that
+        # reaches a real handler) can never read or write the real
+        # directory. Per-test, not per-class, for the same reason
+        # TestSetupRoutes does it per-test: no leftover state from one test
+        # can leak into another.
+        self.tmp = self._tmp_data()
+        real_accounts = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
+
+    def _req(self, path, method="GET", origin=None, host=None, body=None):
+        # Always carry the real token: the rejection cases in this class are
+        # rejected by _local_caller (Host/Origin), which runs before the
+        # token is ever examined, so sending it here doesn't change their
+        # outcome — but the accepted cases need it now that /api/* requires
+        # one, and TestCallerAuth's job is Host/Origin, not the token.
+        headers = {"Content-Type": "application/json",
+                   "X-OurCal-Token": ourcal.SESSION_TOKEN}
+        if origin is not None:
+            headers["Origin"] = origin
+        if host is not None:
+            headers["Host"] = host
+        data = None
+        if method == "POST":
+            data = json.dumps(body or {}).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", data=data,
+            method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def test_no_origin_succeeds(self):
+        # What the app's own page — and urllib, which every other HTTP test
+        # in this suite uses — actually sends: no Origin header at all.
+        status, _ = self._req("/api/status")
+        self.assertEqual(status, 200)
+
+    def test_cross_site_origin_is_rejected_on_import(self):
+        # The demonstrated attack: a page on any other origin POSTing to
+        # /api/import, which would otherwise write attacker-controlled
+        # credentials.json to disk.
+        status, body = self._req(
+            "/api/import", method="POST", origin="https://evil.example",
+            body={"bundle": "nonsense", "passphrase": "x"})
+        self.assertEqual(status, 403)
+        self.assertIn("error", json.loads(body))
+
+    def test_cross_site_origin_is_rejected_on_create(self):
+        # /api/create is exposed by the same hole; in scope alongside import.
+        status, body = self._req(
+            "/api/create", method="POST", origin="https://evil.example",
+            body={})
+        self.assertEqual(status, 403)
+        self.assertIn("error", json.loads(body))
+
+    def test_foreign_host_is_rejected_on_status(self):
+        # DNS rebinding: a page whose hostname later resolves to 127.0.0.1
+        # still sends its own Host header, not "127.0.0.1" or "localhost".
+        status, body = self._req("/api/status", host="evil.example")
+        self.assertEqual(status, 403)
+        self.assertIn("error", json.loads(body))
+
+    def test_loopback_origin_on_any_port_is_accepted(self):
+        # start_server() falls back to an ephemeral port when 8756 is taken,
+        # so the Origin check must accept any loopback port, not just 8756.
+        status, _ = self._req("/api/status", origin="http://127.0.0.1:9999")
+        self.assertEqual(status, 200)
+
+
 class TestDeleteEndpoint(unittest.TestCase):
     """End-to-end over HTTP in demo mode: a deleted event stops coming back."""
 
@@ -1476,13 +1623,16 @@ class TestDeleteEndpoint(unittest.TestCase):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}{path}",
             data=json.dumps(obj).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
         with urllib.request.urlopen(req) as r:
             return r.status, json.loads(r.read().decode())
 
     def _events(self):
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{self.port}/api/events") as r:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/events",
+            headers={"X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
             return json.loads(r.read().decode())["events"]
 
     def _find(self, title):
@@ -1525,7 +1675,8 @@ class TestDeleteEndpoint(unittest.TestCase):
     def test_unknown_post_route_still_404s(self):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/api/nope", data=b"{}",
-            method="POST", headers={"Content-Type": "application/json"})
+            method="POST", headers={"Content-Type": "application/json",
+                                    "X-OurCal-Token": ourcal.SESSION_TOKEN})
         with self.assertRaises(urllib.error.HTTPError) as cm:
             urllib.request.urlopen(req)
         self.assertEqual(cm.exception.code, 404)
@@ -1553,13 +1704,16 @@ class TestUpdateEndpoint(unittest.TestCase):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}{path}",
             data=json.dumps(obj).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
         with urllib.request.urlopen(req) as r:
             return r.status, json.loads(r.read().decode())
 
     def _events(self):
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{self.port}/api/events") as r:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/events",
+            headers={"X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
             return json.loads(r.read().decode())["events"]
 
     def test_edit_round_trips_through_the_api(self):
@@ -1618,6 +1772,41 @@ class TestBootstrapGuard(unittest.TestCase):
             os.environ.pop("OURCAL_REEXEC", None)
 
 
+class TestTimezone(unittest.TestCase):
+    """Android has no system tz database, so tz() must survive a failing
+    ZoneInfo() by reading tzdata's bytes directly."""
+
+    def setUp(self):
+        ourcal._TZ = None                       # defeat the cache per test
+        self.addCleanup(lambda: setattr(ourcal, "_TZ", None))
+
+    def test_returns_a_usable_zone(self):
+        now = datetime.datetime.now(ourcal.tz())
+        self.assertIsNotNone(now.utcoffset())
+
+    def test_is_cached(self):
+        self.assertIs(ourcal.tz(), ourcal.tz())
+
+    def test_falls_back_when_zoneinfo_cannot_find_the_zone(self):
+        # Simulate the Android failure: the direct constructor raises, and the
+        # tzdata-bytes path must still produce the zone.
+        import zoneinfo
+        real = ourcal.ZoneInfo
+
+        class NoSystemTz:
+            def __init__(self, key):
+                raise zoneinfo.ZoneInfoNotFoundError(key)
+            from_file = staticmethod(real.from_file)
+
+        ourcal.ZoneInfo = NoSystemTz
+        self.addCleanup(lambda: setattr(ourcal, "ZoneInfo", real))
+        try:
+            import tzdata  # noqa: F401
+        except ImportError:
+            self.skipTest("tzdata not installed in this environment")
+        self.assertIsNotNone(datetime.datetime.now(ourcal.tz()).utcoffset())
+
+
 class TestPlatform(unittest.TestCase):
     """The same source runs on macOS and Android; the platform seams must
     behave correctly on the side we can test — the desktop side."""
@@ -1634,7 +1823,9 @@ class TestPlatform(unittest.TestCase):
 
     def test_oauth_flow_is_plain_run_local_server_off_android(self):
         # On desktop, run_oauth_flow must not touch webbrowser or defer the
-        # token exchange — it just runs the standard flow.
+        # token exchange — it just runs the standard flow, bounded the same
+        # way the Android branch already is: an abandoned browser tab must
+        # not wait forever and wedge _SIGNIN in "waiting" for good.
         calls = {}
 
         class FakeFlow:
@@ -1643,7 +1834,7 @@ class TestPlatform(unittest.TestCase):
                 return "creds"
 
         self.assertEqual(ourcal.run_oauth_flow(FakeFlow()), "creds")
-        self.assertEqual(calls["kw"], {"port": 0})  # no android extras
+        self.assertEqual(calls["kw"], {"port": 0, "timeout_seconds": 300})
 
 
 class TestClampDays(unittest.TestCase):
@@ -1785,13 +1976,30 @@ class TestStartServer(unittest.TestCase):
         server, url = ourcal.start_server()
         self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
-        self.assertTrue(url.endswith(f":{free}"))
+        # url now ends in "?k=<token>", not the port, so check the port shows
+        # up before the query string rather than at the very end.
+        self.assertIn(f":{free}/?k=", url)
+
+    def test_the_returned_url_carries_the_session_key(self):
+        # This is the actual fix: the URL handed to the in-process view (and
+        # printed by run_server) is the only route by which a legitimate
+        # caller ever reaches / or /setup now that both require ?k=.
+        server, url = ourcal.start_server()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.assertIn(f"k={ourcal.SESSION_TOKEN}", url)
+        with urllib.request.urlopen(url, timeout=5) as r:
+            self.assertEqual(r.status, 200)
 
     def test_the_server_actually_answers(self):
         server, url = ourcal.start_server()
         self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
-        with urllib.request.urlopen(url + "/api/events", timeout=5) as r:
+        port = server.server_address[1]
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/events",
+            headers={"X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req, timeout=5) as r:
             self.assertEqual(r.status, 200)
 
 
@@ -1950,6 +2158,1546 @@ class TestPageStructure(unittest.TestCase):
         # "shifts every occurrence" reads like a translation; what actually
         # happens is that every occurrence before the new date disappears.
         self.assertIn("rebase", ourcal.PAGE.lower())
+
+    def test_banner_collapses_when_the_device_is_unset_up(self):
+        # Four accounts with no credentials.json produced four identical walls
+        # of text naming a path the user cannot reach. One banner with a way
+        # out replaces them.
+        self.assertIn("errs.every(e=>e.setup)", ourcal.PAGE)
+        self.assertIn("isn't set up on this device yet", ourcal.PAGE)
+        self.assertIn("Set up this device", ourcal.PAGE)
+
+    def test_per_account_banners_are_the_fallback_branch_not_dead_code(self):
+        # "Couldn't refresh" being present proves nothing — it predates the
+        # collapse. What matters is that the per-account map is the ternary's
+        # FALSE branch, gated on every error being a setup error. A regression
+        # that hard-wired the collapse would leave the string as dead code and
+        # a mere assertIn would still pass.
+        page = ourcal.PAGE
+        cond = page.index("errs.every(e=>e.setup)")
+        collapse = page.index("isn't set up on this device yet")
+        per_account = page.index("Couldn't refresh <b>")
+        self.assertLess(cond, collapse)          # the condition gates it
+        self.assertLess(collapse, per_account)   # per-account is the : branch
+        self.assertIn(": errs.map(", page[collapse:per_account])
+
+    def test_setup_stays_reachable_after_setup_succeeds(self):
+        # The banner disappears once it works; re-importing after a revoked
+        # token must not require breaking the app first. The link must also
+        # carry the session key forward — /setup 403s without one, so a
+        # stripped-down link would be a dead end.
+        self.assertIn('class="setup-link" href="/setup?k=__SESSION_TOKEN__"',
+                      ourcal.PAGE)
+
+    def test_no_internal_link_is_missing_the_session_key(self):
+        # Every internal navigation (to / or /setup) must carry ?k=, or
+        # clicking it is a 403 the user cannot recover from without knowing
+        # to retype the URL by hand. Catches a link added later that forgets
+        # it, the same way the exploited href="/setup" once did.
+        for href in re.findall(r'href=\\?"(/[^"\\]*)', ourcal.PAGE):
+            if href.startswith("/api/"):
+                continue
+            self.assertIn("k=__SESSION_TOKEN__", href, href)
+
+
+class TestAndroidProbe(unittest.TestCase):
+    """The bug this replaces: is_android() imported a Java package, which
+    returned False on a real device. Every Android seam stayed dark and
+    data_dir() fell through to APP_DIR — Chaquopy's AssetFinder directory,
+    which is regenerated on every APK install. The whole suite missed it
+    because every existing platform test asserts the desktop side."""
+
+    def _fake_api_level(self):
+        import sys
+        sys.getandroidapilevel = lambda: 33
+        self.addCleanup(lambda: delattr(sys, "getandroidapilevel"))
+
+    def test_true_when_the_interpreter_reports_an_android_api_level(self):
+        self._fake_api_level()
+        self.assertTrue(ourcal.is_android())
+
+    def test_false_on_a_plain_desktop(self):
+        self.assertFalse(ourcal.is_android())
+
+    def test_false_when_the_java_bridge_raises_a_non_importerror(self):
+        # The old probe only caught ImportError. A bridge that is present but
+        # not ready raises other things, and an uncaught one would crash the
+        # app at import time instead of degrading.
+        import builtins
+        real = builtins.__import__
+
+        def boom(name, *a, **k):
+            if name.startswith("com.chaquo"):
+                raise RuntimeError("bridge not ready")
+            return real(name, *a, **k)
+
+        builtins.__import__ = boom
+        self.addCleanup(lambda: setattr(builtins, "__import__", real))
+        self.assertFalse(ourcal.is_android())
+
+    def test_true_when_the_chaquopy_import_succeeds(self):
+        # The other half of the fallback: `import com.chaquo.python`
+        # succeeding, with no interpreter probe available. Nothing exercised
+        # this before — the same shape of untested True branch this whole
+        # branch exists to fix.
+        import sys
+        import types
+        added = []
+        for name in ("com", "com.chaquo", "com.chaquo.python"):
+            if name not in sys.modules:
+                sys.modules[name] = types.ModuleType(name)
+                added.append(name)
+        # Remove exactly what we added, nothing a prior/parallel test left.
+        self.addCleanup(lambda: [sys.modules.pop(n, None) for n in added])
+        self.assertFalse(hasattr(sys, "getandroidapilevel"))
+        self.assertTrue(ourcal.is_android())
+
+
+class TestAndroidDataDir(unittest.TestCase):
+    """The Android branch, exercised on the desktop by faking the probe —
+    the coverage that never existed."""
+
+    def _android(self, path="/data/data/com.leelakumili.ourcal/files"):
+        real_a, real_d = ourcal.is_android, ourcal.android_data_dir
+        ourcal.is_android = lambda: True
+        ourcal.android_data_dir = lambda: path
+        self.addCleanup(lambda: setattr(ourcal, "is_android", real_a))
+        self.addCleanup(lambda: setattr(ourcal, "android_data_dir", real_d))
+
+    def test_android_beats_both_desktop_branches(self):
+        self._android()
+        real = ourcal.is_bundled
+        ourcal.is_bundled = lambda: True      # even bundled, Android wins
+        self.addCleanup(lambda: setattr(ourcal, "is_bundled", real))
+        self.assertEqual(ourcal.data_dir(),
+                         "/data/data/com.leelakumili.ourcal/files")
+
+    def test_token_path_follows_the_android_branch(self):
+        self._android("/android/files")
+        self.assertEqual(ourcal.token_path("Leela K"),
+                         "/android/files/token_leela-k.json")
+
+    def test_user_path_follows_the_android_branch(self):
+        self._android("/android/files")
+        self.assertEqual(ourcal.user_path("credentials.json"),
+                         "/android/files/credentials.json")
+
+    def test_data_dir_falls_back_when_the_bridge_import_fails(self):
+        # The bridge import demonstrably failed on the device that reported
+        # the original bug, for reasons still unknown. If it fails again,
+        # data_dir() must degrade (fall through to the desktop rule) rather
+        # than raise — an uncaught raise here happens at module import time
+        # (ensure_data_dir() runs at import), which would crash app startup
+        # entirely instead of just resolving the wrong directory.
+        real_a, real_d = ourcal.is_android, ourcal.android_data_dir
+        ourcal.is_android = lambda: True
+
+        def boom():
+            raise RuntimeError("bridge not ready")
+
+        ourcal.android_data_dir = boom
+        self.addCleanup(lambda: setattr(ourcal, "is_android", real_a))
+        self.addCleanup(lambda: setattr(ourcal, "android_data_dir", real_d))
+        self._bundled(False)
+        self.assertEqual(ourcal.data_dir(), ourcal.APP_DIR)
+
+    def _bundled(self, yes):
+        real = ourcal.is_bundled
+        ourcal.is_bundled = lambda: yes
+        self.addCleanup(lambda: setattr(ourcal, "is_bundled", real))
+
+
+class TestBundleRoundTrip(unittest.TestCase):
+    """The bundle crosses an untrusted channel — it carries live refresh
+    tokens, and any convenient Mac-to-phone text route touches a cloud."""
+
+    FILES = {"credentials.json": '{"installed": {"client_id": "abc"}}',
+             "accounts.json": '[{"label": "L", "email": "l@example.com"}]',
+             "token_l.json": '{"refresh_token": "1//secret"}'}
+
+    def test_round_trips_every_file_byte_for_byte(self):
+        b = ourcal.make_bundle(self.FILES, "correct horse")
+        self.assertEqual(ourcal.open_bundle(b, "correct horse"), self.FILES)
+
+    def test_bundle_is_one_pasteable_line(self):
+        b = ourcal.make_bundle(self.FILES, "pw")
+        self.assertTrue(b.startswith("ourcal1."))
+        self.assertNotIn("\n", b)
+
+    def test_the_plaintext_is_not_recoverable_from_the_bundle(self):
+        b = ourcal.make_bundle(self.FILES, "pw")
+        self.assertNotIn("1//secret", b)
+        self.assertNotIn("l@example.com", b)
+
+    def test_two_exports_of_the_same_files_differ(self):
+        # Fresh salt and nonce each time; identical bundles would leak that
+        # nothing changed between two exports.
+        a = ourcal.make_bundle(self.FILES, "pw")
+        b = ourcal.make_bundle(self.FILES, "pw")
+        self.assertNotEqual(a, b)
+        self.assertEqual(ourcal.open_bundle(a, "pw"),
+                         ourcal.open_bundle(b, "pw"))
+
+    def test_survives_being_pasted_with_surrounding_whitespace(self):
+        b = ourcal.make_bundle(self.FILES, "pw")
+        self.assertEqual(ourcal.open_bundle("\n  " + b + "  \n", "pw"),
+                         self.FILES)
+
+    def test_survives_being_hard_wrapped_by_a_mail_client(self):
+        # The bundle travels through a messaging app by design, and those wrap
+        # long strings. A newline every 72 chars must not read as truncation.
+        b = ourcal.make_bundle(self.FILES, "pw")
+        wrapped = "\n".join(b[i:i + 72] for i in range(0, len(b), 72))
+        self.assertEqual(ourcal.open_bundle(wrapped, "pw"), self.FILES)
+
+
+class TestBundleRejection(unittest.TestCase):
+    FILES = {"credentials.json": '{"installed": {}}'}
+
+    def test_wrong_passphrase(self):
+        b = ourcal.make_bundle(self.FILES, "right")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(b, "wrong")
+        self.assertIn("Wrong passphrase", str(cm.exception))
+
+    def test_a_single_flipped_byte_is_caught_by_the_mac(self):
+        import base64
+        b = ourcal.make_bundle(self.FILES, "pw")
+        body = b[len("ourcal1."):]
+        raw = bytearray(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        raw[40] ^= 1                     # inside the ciphertext
+        tampered = "ourcal1." + base64.urlsafe_b64encode(
+            bytes(raw)).decode().rstrip("=")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(tampered, "pw")
+        # Tampering and a wrong passphrase are deliberately indistinguishable.
+        self.assertIn("Wrong passphrase", str(cm.exception))
+
+    def test_missing_prefix(self):
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle("just some text", "pw")
+        self.assertIn("doesn't look like an OurCal bundle", str(cm.exception))
+
+    def test_truncated_bundle(self):
+        b = ourcal.make_bundle(self.FILES, "pw")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(b[:20], "pw")
+        self.assertIn("truncated", str(cm.exception))
+
+    def test_empty_input(self):
+        with self.assertRaises(ourcal.BundleError):
+            ourcal.open_bundle("", "pw")
+
+    def test_prefix_with_nothing_after_it(self):
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle("ourcal1.", "pw")
+        self.assertIn("truncated", str(cm.exception))
+
+    def test_a_non_dict_files_payload_is_reported_as_corrupt(self):
+        # A frame with a genuinely correct MAC (built with make_bundle, the
+        # module's own helper, so the HMAC check upstream of this passes)
+        # whose *decrypted* payload has the wrong shape. Every other
+        # corruption test is caught by the HMAC check first; this is the
+        # only way to reach the value-shape check beyond it.
+        b = ourcal.make_bundle(["not", "a", "dict"], "pw")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(b, "pw")
+        self.assertIn("The bundle is corrupt.", str(cm.exception))
+
+    def test_a_non_string_value_is_reported_as_corrupt(self):
+        b = ourcal.make_bundle({"credentials.json": 123}, "pw")
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.open_bundle(b, "pw")
+        self.assertIn("The bundle is corrupt.", str(cm.exception))
+
+
+class TestBundleWireFormat(unittest.TestCase):
+    """A known-answer test, so the format cannot drift silently.
+
+    Every other test round-trips through our own code and would stay green
+    through a format change — while bundles from a different build stopped
+    opening. The phone runs a sideloaded APK that does not auto-update, so a
+    Mac one version ahead of the phone is the normal case.
+    """
+
+    BUNDLE = "ourcal1.gGku7vOgzDk2FEZ4T-IOtaV3R1wMn_nJb-_qX2QSP_3nnF-iTg9pzFigrc0v0eIGAwSGmccTmBOizbr4t4P_i8Dk4JGS8u-EujUGjB8SL_FyKhEgp1FrxD1rpwFzwlLC82otTh5wUbeHTnIxXOqZpaFBxahB_QdD4WnfxjFy5e8uI3bYLn0h27TZv_5TgWu-_slcn-KPnw7hre6wNB0"
+
+    def test_opens_a_bundle_produced_by_an_earlier_build(self):
+        self.assertEqual(
+            ourcal.open_bundle(self.BUNDLE, "known-answer-passphrase"),
+            {"credentials.json": '{"installed": {"client_id": "kat"}}'})
+
+
+class TestUserFileWhitelist(unittest.TestCase):
+    """A bundle is untrusted input. Names are matched against a whitelist,
+    never sanitised: os.path.join with a crafted name is a traversal."""
+
+    def test_accepts_the_two_config_files(self):
+        self.assertTrue(ourcal.is_user_file("credentials.json"))
+        self.assertTrue(ourcal.is_user_file("accounts.json"))
+
+    def test_accepts_slugged_token_names(self):
+        self.assertTrue(ourcal.is_user_file("token_leela.json"))
+        self.assertTrue(ourcal.is_user_file("token_leela-k.json"))
+        self.assertTrue(ourcal.is_user_file("token_leela-26033.json"))
+
+    def test_rejects_traversal(self):
+        for bad in ["../evil.json", "../../etc/passwd",
+                    "token_a/b.json", "/etc/passwd", "token_../x.json"]:
+            self.assertFalse(ourcal.is_user_file(bad), bad)
+
+    def test_rejects_names_outside_the_whitelist(self):
+        for bad in ["random.json", "TOKEN_X.json", "token_.json",
+                    "token_Leela.json", "credentials.json.bak", "", "."]:
+            self.assertFalse(ourcal.is_user_file(bad), bad)
+
+
+class TestWriteSecretFile(_TmpData, unittest.TestCase):
+    """The one writer every credential file routes through. Before this
+    helper existed, creds_for's refresh write-back and _run_signin's token
+    write both used a plain open(path, "w"), which on a default umask lands
+    at 0644 — the same refresh token ending up world-readable or owner-only
+    depending on which of three code paths wrote it last."""
+
+    def test_writes_the_content_atomically_with_owner_only_mode(self):
+        import stat
+        tmp = self._tmp_data()
+        path = os.path.join(tmp, "secret.json")
+        ourcal.write_secret_file(path, "top secret")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "top secret")
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        self.assertEqual(mode, 0o600)
+        # No leftover ".tmp" file from the write-then-rename.
+        self.assertEqual(os.listdir(tmp), ["secret.json"])
+
+    def test_overwrites_existing_content_cleanly(self):
+        tmp = self._tmp_data()
+        path = os.path.join(tmp, "secret.json")
+        ourcal.write_secret_file(path, "first")
+        ourcal.write_secret_file(path, "second")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "second")
+
+
+class TestWriteUserFiles(_TmpData, unittest.TestCase):
+    GOOD = {"credentials.json": '{"installed": {"client_id": "x"}}',
+            "accounts.json": '[{"label": "L", "email": "l@example.com"}]',
+            "token_l.json": '{"refresh_token": "s"}'}
+
+    def test_writes_every_file(self):
+        tmp = self._tmp_data()
+        self.assertEqual(ourcal.write_user_files(self.GOOD),
+                         ["accounts.json", "credentials.json", "token_l.json"])
+        for name, body in self.GOOD.items():
+            with open(os.path.join(tmp, name)) as f:
+                self.assertEqual(f.read(), body)
+
+    def test_files_are_owner_only(self):
+        import stat
+        tmp = self._tmp_data()
+        ourcal.write_user_files(self.GOOD)
+        for name in self.GOOD:
+            mode = stat.S_IMODE(os.stat(os.path.join(tmp, name)).st_mode)
+            self.assertEqual(mode, 0o600, name)
+
+    def test_a_bad_name_writes_nothing_at_all(self):
+        # All-or-nothing: validate everything before writing anything, so a
+        # rejected bundle cannot leave a half-configured device. The bad key
+        # must sort *after* every good filename (token_zz/x.json, not
+        # ../evil.json) — otherwise a wrong implementation that validated and
+        # wrote one file at a time would still pass this test by chance.
+        tmp = self._tmp_data()
+        payload = dict(self.GOOD)
+        payload["token_zz/x.json"] = "{}"
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.write_user_files(payload)
+        self.assertIn("unexpected file", str(cm.exception))
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_invalid_accounts_json_writes_nothing_at_all(self):
+        # Ordering weakness, known and structural: nothing whitelisted sorts
+        # before "accounts.json", so this test cannot prove validate-before-
+        # write the way test_a_bad_name_writes_nothing_at_all does above.
+        tmp = self._tmp_data()
+        payload = dict(self.GOOD)
+        payload["accounts.json"] = '[{"label": "", "email": "nope"}]'
+        with self.assertRaises(ourcal.BundleError) as cm:
+            ourcal.write_user_files(payload)
+        self.assertIn("accounts list in the bundle is invalid",
+                      str(cm.exception))
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_non_json_content_writes_nothing_at_all(self):
+        tmp = self._tmp_data()
+        payload = dict(self.GOOD)
+        payload["token_l.json"] = "not json at all"
+        with self.assertRaises(ourcal.BundleError):
+            ourcal.write_user_files(payload)
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_leaves_no_temp_files_behind(self):
+        tmp = self._tmp_data()
+        ourcal.write_user_files(self.GOOD)
+        self.assertEqual(sorted(os.listdir(tmp)), sorted(self.GOOD))
+
+
+class TestReloadAccounts(_TmpData, unittest.TestCase):
+    """ACCOUNTS resolves at import (ourcal.py:142), so writing accounts.json
+    changes nothing until it is re-read. Without this the phone keeps showing
+    the placeholder Personal/Work chips after a successful import."""
+
+    def setUp(self):
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+
+    def test_import_replaces_the_module_global(self):
+        self._tmp_data()
+        files = {"credentials.json": '{"installed": {}}',
+                 "accounts.json": json.dumps(
+                     [{"label": "Imported", "email": "i@example.com"}])}
+        bundle = ourcal.make_bundle(files, "pw")
+        result = ourcal.import_bundle(bundle, "pw")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["accounts"], 1)
+        self.assertEqual([a["label"] for a in ourcal.ACCOUNTS], ["Imported"])
+
+    def test_a_bundle_without_accounts_leaves_them_alone(self):
+        self._tmp_data()
+        before = list(ourcal.ACCOUNTS)
+        bundle = ourcal.make_bundle({"credentials.json": '{"installed": {}}'},
+                                    "pw")
+        ourcal.import_bundle(bundle, "pw")
+        self.assertEqual(ourcal.ACCOUNTS, before)
+
+    def test_a_wrong_passphrase_writes_nothing(self):
+        tmp = self._tmp_data()
+        bundle = ourcal.make_bundle({"credentials.json": '{"installed": {}}'},
+                                    "right")
+        with self.assertRaises(ourcal.BundleError):
+            ourcal.import_bundle(bundle, "wrong")
+        self.assertEqual(os.listdir(tmp), [])
+
+
+class TestCollectUserFiles(_TmpData, unittest.TestCase):
+    def test_collects_only_whitelisted_names(self):
+        tmp = self._tmp_data()
+        for name in ["credentials.json", "accounts.json", "token_l.json",
+                     "notes.txt", "token_BAD.json", ".DS_Store"]:
+            with open(os.path.join(tmp, name), "w") as f:
+                f.write("{}")
+        self.assertEqual(sorted(ourcal.collect_user_files()),
+                         ["accounts.json", "credentials.json", "token_l.json"])
+
+    def test_empty_when_the_directory_is_missing(self):
+        real = ourcal.data_dir
+        ourcal.data_dir = lambda: "/nonexistent/ourcal/nowhere"
+        self.addCleanup(lambda: setattr(ourcal, "data_dir", real))
+        self.assertEqual(ourcal.collect_user_files(), {})
+
+
+class TestExportImportRoundTrip(_TmpData, unittest.TestCase):
+    """The whole point, end to end: what --export prints is what the phone
+    can open."""
+
+    def setUp(self):
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+
+    def test_a_mac_export_imports_onto_a_fresh_device(self):
+        mac = self._tmp_data()
+        files = {
+            "credentials.json": '{"installed": {"client_id": "x"}}',
+            "accounts.json": json.dumps(
+                [{"label": "Leela", "email": "l@example.com"},
+                 {"label": "Leela K", "email": "lk@example.com"}]),
+            "token_leela.json": '{"refresh_token": "a"}',
+            "token_leela-k.json": '{"refresh_token": "b"}'}
+        for name, body in files.items():
+            with open(os.path.join(mac, name), "w") as f:
+                f.write(body)
+        bundle = ourcal.make_bundle(ourcal.collect_user_files(), "pw")
+
+        phone = self._tmp_data()          # redirect again: a different device
+        result = ourcal.import_bundle(bundle, "pw")
+        self.assertEqual(result["accounts"], 2)
+        self.assertEqual(sorted(os.listdir(phone)), sorted(files))
+        for name, body in files.items():
+            with open(os.path.join(phone, name)) as f:
+                self.assertEqual(f.read(), body)
+
+    def test_a_non_ascii_account_label_survives_the_round_trip(self):
+        # The bundle is a cross-machine format: a non-ASCII label must
+        # survive on purpose, not merely because both Mac and Android happen
+        # to default to UTF-8 — collect_user_files/write_user_files/
+        # load_accounts must say encoding="utf-8" explicitly.
+        #
+        # The trouble: this machine's own ambient locale is *also* UTF-8, so
+        # every assertion below on file *contents* would still pass even if
+        # a future edit quietly dropped one of those explicit encodings and
+        # fell back to the platform default — exactly the bug this test is
+        # supposed to catch (verified against a real regression: reverting
+        # load_accounts's encoding="utf-8" does not fail any assertion in
+        # this test on this machine). A test cannot force the interpreter
+        # into a non-UTF-8 locale mid-process either — open()'s default
+        # encoding is resolved inside the C `_io` module straight from the
+        # OS locale; patching the Python-level locale.getpreferredencoding
+        # has no effect on it (checked by hand: monkeypatching it and
+        # writing a non-ASCII string through a plain open() with no
+        # encoding= still writes UTF-8 on this interpreter).
+        #
+        # So alongside the behavioral round trip, this spies on every
+        # open() of the two files it touches and asserts encoding="utf-8"
+        # was passed explicitly each time. That assertion is about what the
+        # source code asks for, not what this machine's locale happens to
+        # produce, so it stays meaningful regardless of the ambient locale
+        # — and it would have caught the load_accounts miss even here.
+        mac = self._tmp_data()
+        files = {
+            "credentials.json": '{"installed": {"client_id": "x"}}',
+            "accounts.json": json.dumps(
+                [{"label": "Renée家", "email": "l@example.com"}],
+                ensure_ascii=False)}
+        for name, body in files.items():
+            with open(os.path.join(mac, name), "w", encoding="utf-8") as f:
+                f.write(body)
+
+        import builtins
+        encodings_seen = []
+        real_open = builtins.open
+
+        def spy_open(file, *args, **kwargs):
+            if isinstance(file, str) and os.path.basename(file) in files:
+                encodings_seen.append(kwargs.get("encoding"))
+            return real_open(file, *args, **kwargs)
+
+        builtins.open = spy_open
+        try:
+            bundle = ourcal.make_bundle(ourcal.collect_user_files(), "pw")
+            phone = self._tmp_data()      # redirect again: a different device
+            result = ourcal.import_bundle(bundle, "pw")
+        finally:
+            builtins.open = real_open
+
+        # collect_user_files read both files on "mac"; reload_accounts (via
+        # import_bundle) read accounts.json back on "phone". Every one of
+        # those open() calls must have named utf-8 explicitly — none may
+        # have fallen through to the platform default (encoding=None).
+        self.assertTrue(encodings_seen)
+        self.assertTrue(all(enc == "utf-8" for enc in encodings_seen),
+                        encodings_seen)
+
+        self.assertEqual(result["accounts"], 1)
+        self.assertEqual(ourcal.ACCOUNTS[0]["label"], "Renée家")
+        with open(os.path.join(phone, "accounts.json"),
+                 encoding="utf-8") as f:
+            self.assertEqual(f.read(), files["accounts.json"])
+
+
+class TestExportCli(_TmpData, unittest.TestCase):
+    def test_refuses_without_credentials(self):
+        self._tmp_data()               # empty
+        self.assertEqual(ourcal.export_cli(), 1)
+
+    def test_refuses_when_the_passphrases_differ(self):
+        import getpass
+        tmp = self._tmp_data()
+        with open(os.path.join(tmp, "credentials.json"), "w") as f:
+            f.write("{}")
+        answers = iter(["correct horse battery", "correct horse battery!"])
+        real = getpass.getpass
+        getpass.getpass = lambda *a, **k: next(answers)
+        self.addCleanup(lambda: setattr(getpass, "getpass", real))
+        self.assertEqual(ourcal.export_cli(), 1)
+
+    def test_refuses_a_short_passphrase(self):
+        # The design's threat model assumes the ciphertext is obtained, at
+        # which point PBKDF2 is the only defence and a weak passphrase is the
+        # whole game — this bundle carries live Google refresh tokens.
+        import contextlib
+        import getpass
+        import io
+        tmp = self._tmp_data()
+        with open(os.path.join(tmp, "credentials.json"), "w") as f:
+            f.write("{}")
+        real = getpass.getpass
+        getpass.getpass = lambda *a, **k: "short"
+        self.addCleanup(lambda: setattr(getpass, "getpass", real))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(ourcal.export_cli(), 1)
+        self.assertIn("12", err.getvalue())
+        self.assertEqual(os.listdir(tmp), ["credentials.json"])  # nothing new
+
+    def test_prints_only_the_bundle_on_stdout(self):
+        # `./ourcal.py --export | pbcopy` must pipe the bundle and nothing
+        # else; warnings go to stderr and getpass prompts on the tty.
+        import contextlib
+        import getpass
+        import io
+        tmp = self._tmp_data()
+        with open(os.path.join(tmp, "credentials.json"), "w") as f:
+            f.write('{"installed": {}}')
+        real = getpass.getpass
+        getpass.getpass = lambda *a, **k: "a passphrase over 12 chars"
+        self.addCleanup(lambda: setattr(getpass, "getpass", real))
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(ourcal.export_cli(), 0)
+        printed = out.getvalue().strip()
+        self.assertEqual(len(printed.splitlines()), 1)
+        self.assertEqual(
+            ourcal.open_bundle(printed, "a passphrase over 12 chars"),
+            {"credentials.json": '{"installed": {}}'})
+        # The live-refresh-token warning is a specified requirement — it must
+        # actually reach stderr, not just avoid stdout.
+        self.assertIn("refresh tokens", err.getvalue())
+
+
+class TestSetupStatus(_TmpData, unittest.TestCase):
+    """The diagnostics footer. A month of Android breakage was invisible
+    because nothing on the phone ever reported which directory it resolved."""
+
+    def setUp(self):
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+
+    def test_reports_an_empty_device(self):
+        tmp = self._tmp_data()
+        s = ourcal.setup_status()
+        self.assertEqual(s["dataDir"], tmp)
+        self.assertFalse(s["android"])
+        self.assertFalse(s["hasCredentials"])
+        self.assertIsNone(s["credentialsSource"])
+        self.assertFalse(s["accountsFromFile"])
+        self.assertEqual(s["signedIn"], [])
+
+    def test_reports_credentials_and_sign_ins(self):
+        tmp = self._tmp_data()
+        ourcal.ACCOUNTS = [{"label": "Leela", "email": "l@example.com"},
+                           {"label": "Leela K", "email": "lk@example.com"}]
+        for name in ["credentials.json", "accounts.json", "token_leela.json"]:
+            with open(os.path.join(tmp, name), "w") as f:
+                f.write("{}")
+        s = ourcal.setup_status()
+        self.assertTrue(s["hasCredentials"])
+        self.assertEqual(s["credentialsSource"], "pasted")
+        self.assertTrue(s["accountsFromFile"])
+        self.assertEqual(s["accounts"], 2)
+        self.assertEqual(s["signedIn"], ["Leela"])   # Leela K has no token
+
+    def test_reports_bundled_when_nothing_is_pasted(self):
+        # A fresh install running purely on the shipped client must not be
+        # misreported as "credentials.json: missing" — that would send
+        # someone debugging a working install in the wrong direction.
+        self._tmp_data()
+        real = ourcal.bundled_credentials
+        ourcal.bundled_credentials = lambda: '{"installed": {"client_id": "B"}}'
+        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
+        s = ourcal.setup_status()
+        self.assertTrue(s["hasCredentials"])
+        self.assertEqual(s["credentialsSource"], "bundled")
+
+    def test_reports_the_android_branch(self):
+        self._tmp_data()
+        real = ourcal.is_android
+        ourcal.is_android = lambda: True
+        self.addCleanup(lambda: setattr(ourcal, "is_android", real))
+        self.assertTrue(ourcal.setup_status()["android"])
+
+    def test_bridge_is_false_off_android(self):
+        # The real android_data_dir() imports com.chaquo.python, which does
+        # not exist here — bridge must report that without raising.
+        self._tmp_data()
+        self.assertFalse(ourcal.setup_status()["bridge"])
+
+    def test_bridge_reflects_whether_android_data_dir_actually_works(self):
+        # android and bridge are independent: this is the "android branch
+        # live but bridge unavailable" combination the footer must be able
+        # to show, distinct from a plain desktop where android is False too.
+        self._tmp_data()
+        real_a, real_d = ourcal.is_android, ourcal.android_data_dir
+        ourcal.is_android = lambda: True
+        ourcal.android_data_dir = lambda: (_ for _ in ()).throw(
+            RuntimeError("bridge not ready"))
+        self.addCleanup(lambda: setattr(ourcal, "is_android", real_a))
+        self.addCleanup(lambda: setattr(ourcal, "android_data_dir", real_d))
+        s = ourcal.setup_status()
+        self.assertTrue(s["android"])
+        self.assertFalse(s["bridge"])
+
+    def test_bridge_is_true_when_android_data_dir_succeeds(self):
+        self._tmp_data()
+        real_d = ourcal.android_data_dir
+        ourcal.android_data_dir = lambda: "/android/files"
+        self.addCleanup(lambda: setattr(ourcal, "android_data_dir", real_d))
+        self.assertTrue(ourcal.setup_status()["bridge"])
+
+
+class TestSetupErrorFlag(unittest.TestCase):
+    """The banner must not string-match error text to decide whether to offer
+    setup — a missing credentials.json is a different thing from a dead
+    token, and only the first one has a way out on the phone."""
+
+    def _events_with(self, exc):
+        real = ourcal.service_for
+        ourcal.service_for = lambda label, email: (_ for _ in ()).throw(exc)
+        self.addCleanup(lambda: setattr(ourcal, "service_for", real))
+        return ourcal.list_account_events("L", "l@example.com", "a", "b")
+
+    def test_missing_credentials_is_flagged_as_setup(self):
+        _, err = self._events_with(FileNotFoundError("credentials.json is missing"))
+        self.assertTrue(err["setup"])
+        self.assertIn("credentials.json is missing", err["message"])
+
+    def test_any_other_failure_is_not_flagged_as_setup(self):
+        _, err = self._events_with(RuntimeError("token revoked"))
+        self.assertFalse(err["setup"])
+        self.assertIn("re-auth", err["message"])
+
+    def test_collect_carries_the_flag_through_with_the_label(self):
+        real_accounts = ourcal.ACCOUNTS
+        ourcal.ACCOUNTS = [{"label": "Only", "email": "o@example.com"}]
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
+        real = ourcal.list_account_events
+        ourcal.list_account_events = lambda *a: (
+            [], {"message": "m", "setup": True})
+        self.addCleanup(lambda: setattr(ourcal, "list_account_events", real))
+        _, errors = ourcal._google_collect(
+            datetime.datetime(2026, 8, 7, tzinfo=datetime.timezone.utc))
+        self.assertEqual(errors,
+                         [{"label": "Only", "message": "m", "setup": True}])
+
+    def test_a_wrong_signed_in_account_is_not_flagged_as_setup(self):
+        # Drives the real list_account_events to the mismatch branch, which no
+        # other test reaches: service_for is faked to SUCCEED and return
+        # somebody else's primary calendar. Left as a bare string, this site
+        # would blow up at **err in _google_collect only for a real user.
+        class _Cals:
+            def list(self, pageToken=None):
+                return self
+
+            def execute(self):
+                return {"items": [{"id": "someone.else@example.com",
+                                   "primary": True}]}
+
+        class _Svc:
+            def calendarList(self):
+                return _Cals()
+
+        real = ourcal.service_for
+        ourcal.service_for = lambda label, email: _Svc()
+        self.addCleanup(lambda: setattr(ourcal, "service_for", real))
+        events, err = ourcal.list_account_events(
+            "Leela", "leela@example.com", "a", "b")
+        self.assertEqual(events, [])
+        self.assertFalse(err["setup"])          # not a setup problem
+        self.assertIn("someone.else@example.com", err["message"])
+        self.assertIn("leela@example.com", err["message"])
+
+
+class TestSetupRoutes(_TmpData, unittest.TestCase):
+    """CONTRIBUTING.md:49 — never let a test reach the real data directory.
+    Every test in this class posts to live routes over HTTP, and a bad bundle
+    is meant to fail before any write happens — but that is an implementation
+    detail, one bug away from overwriting the owner's real credentials.json,
+    accounts.json and four token files. data_dir() is redirected per-test
+    (setUp), not once for the class, so no test can see another test's
+    leftover files and no ordering assumption is load-bearing."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["OURCAL_DEMO"] = "1"
+        cls.server = ourcal.make_server(0)
+        cls.port = cls.server.server_address[1]
+        cls.t = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.t.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        real_accounts = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real_accounts))
+
+    def _get(self, path):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.read().decode()
+
+    def _post(self, path, obj):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(obj).encode(), method="POST",
+            headers={"Content-Type": "application/json",
+                     "X-OurCal-Token": ourcal.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read().decode())
+
+    def test_setup_page_is_served(self):
+        # /setup requires ?k=, not the X-OurCal-Token header _get sends.
+        status, body = self._get(f"/setup?k={ourcal.SESSION_TOKEN}")
+        self.assertEqual(status, 200)
+        self.assertIn("Set up this device", body)
+        self.assertIn("/api/import", body)
+
+    def test_status_endpoint_shape(self):
+        # data_dir() is redirected to a fresh temp dir per test (setUp), so
+        # this no longer reads the real device — assert key names and types,
+        # not specific paths or counts that would depend on that real state.
+        _, body = self._get("/api/status")
+        s = json.loads(body)
+        self.assertEqual(sorted(s), ["accountLabels", "accounts",
+                                     "accountsFromFile", "android", "bridge",
+                                     "credentialsSource", "dataDir",
+                                     "hasCredentials", "signedIn"])
+        self.assertIsInstance(s["dataDir"], str)
+        self.assertIsInstance(s["android"], bool)
+        self.assertIsInstance(s["bridge"], bool)
+        self.assertIsInstance(s["hasCredentials"], bool)
+        self.assertIn(s["credentialsSource"], (None, "pasted", "bundled"))
+        self.assertIsInstance(s["accounts"], int)
+        self.assertIsInstance(s["accountsFromFile"], bool)
+        self.assertIsInstance(s["accountLabels"], list)
+        self.assertIsInstance(s["signedIn"], list)
+
+    def test_import_reports_a_bad_bundle_without_a_500(self):
+        status, body = self._post("/api/import",
+                                  {"bundle": "nonsense", "passphrase": "x"})
+        self.assertEqual(status, 200)
+        self.assertFalse(body["ok"])
+        self.assertIn("doesn't look like an OurCal bundle", body["error"])
+        self.assertEqual(os.listdir(self.tmp), [])
+
+    def test_import_reports_a_wrong_passphrase(self):
+        bundle = ourcal.make_bundle({"credentials.json": "{}"}, "right")
+        _, body = self._post("/api/import",
+                             {"bundle": bundle, "passphrase": "wrong"})
+        self.assertFalse(body["ok"])
+        self.assertIn("Wrong passphrase", body["error"])
+        self.assertEqual(os.listdir(self.tmp), [])
+
+    def test_import_writes_a_real_bundle(self):
+        bundle = ourcal.make_bundle(
+            {"credentials.json": '{"installed": {}}',
+             "accounts.json": json.dumps(
+                 [{"label": "Phone", "email": "p@example.com"}])}, "pw")
+        _, body = self._post("/api/import",
+                             {"bundle": bundle, "passphrase": "pw"})
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["written"],
+                         ["accounts.json", "credentials.json"])
+        self.assertEqual(body["accounts"], 1)
+        self.assertEqual(sorted(os.listdir(self.tmp)),
+                         ["accounts.json", "credentials.json"])
+
+    def test_accounts_route_adds_an_account(self):
+        # /api/accounts and /api/accounts/remove were, until now, tested only
+        # by calling add_account/remove_account directly — the routes dict
+        # wiring and the endpoint wrappers (accounts_endpoint,
+        # accounts_remove_endpoint) were unverified, unlike /api/import's
+        # sibling test above.
+        status, body = self._post(
+            "/api/accounts", {"label": "Phone", "email": "p@example.com"})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"], body)
+        self.assertEqual(body["accounts"], 1)
+        with open(os.path.join(self.tmp, "accounts.json"),
+                  encoding="utf-8") as f:
+            written = json.load(f)
+        self.assertEqual([a["label"] for a in written], ["Phone"])
+
+    def test_accounts_remove_route_removes_the_account_and_its_token(self):
+        self._post("/api/accounts", {"label": "Phone", "email": "p@example.com"})
+        self._post("/api/accounts", {"label": "Second", "email": "s@example.com"})
+        tok = ourcal.token_path("Phone")
+        with open(tok, "w", encoding="utf-8") as f:
+            f.write("{}")
+        status, body = self._post("/api/accounts/remove", {"label": "Phone"})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"], body)
+        self.assertFalse(os.path.exists(tok))
+        with open(os.path.join(self.tmp, "accounts.json"),
+                  encoding="utf-8") as f:
+            written = json.load(f)
+        self.assertEqual([a["label"] for a in written], ["Second"])
+
+
+class TestSetupPageStructure(unittest.TestCase):
+    def test_page_has_the_markers_it_needs(self):
+        for marker in ['id="bundle"', 'id="passphrase"', 'id="doImport"',
+                       'id="result"', 'id="diag"', "/api/import",
+                       "/api/status", "--export", "prefers-color-scheme"]:
+            self.assertIn(marker, ourcal.SETUP_PAGE, f"missing {marker!r}")
+
+    def test_page_reports_the_resolved_data_dir(self):
+        # The diagnostic that would have made the seam bug obvious.
+        self.assertIn("dataDir", ourcal.SETUP_PAGE)
+        self.assertIn("android", ourcal.SETUP_PAGE)
+
+    def test_page_distinguishes_a_dead_bridge_from_an_inactive_branch(self):
+        # "android branch live" and "android branch live but the bridge is
+        # unavailable" are different diagnoses — the footer must be able to
+        # tell them apart, not just report the android flag.
+        self.assertIn("s.bridge", ourcal.SETUP_PAGE)
+        self.assertIn("bridge is", ourcal.SETUP_PAGE.lower())
+
+    def test_no_internal_link_is_missing_the_session_key(self):
+        # Same requirement as PAGE's: an internal link with no ?k= is a 403
+        # the user cannot recover from without knowing to retype the URL.
+        for href in re.findall(r'href=\\?"(/[^"\\]*)', ourcal.SETUP_PAGE):
+            if href.startswith("/api/"):
+                continue
+            self.assertIn("k=__SESSION_TOKEN__", href, href)
+
+    def test_accounts_list_does_not_show_placeholders_before_import(self):
+        # Personal/you@example.com and Work/you@work.example.com are
+        # placeholders until accounts.json exists. Listing them as if real —
+        # with working Remove/Sign in buttons — made a stranger's first "Add"
+        # of an account named "Work" (the design's own mock-up example)
+        # collide with a placeholder of the same name they never added.
+        self.assertIn("accountsFromFile", ourcal.SETUP_PAGE)
+        self.assertIn("No accounts yet", ourcal.SETUP_PAGE)
+
+    def test_sign_in_is_always_offered_not_only_before_first_success(self):
+        # A revoked grant or dead token leaves the token file present, so
+        # signedIn stays true — the button must not disappear once it's ever
+        # been true, or a dead account has no way back.
+        self.assertNotIn('(on ? "" :', ourcal.SETUP_PAGE)
+        self.assertIn("Sign in again", ourcal.SETUP_PAGE)
+
+
+class TestSessionToken(_TmpData, unittest.TestCase):
+    """The hole _local_caller could not close.
+
+    Host and Origin only constrain browsers. A native process sends no
+    Origin and is accepted — on Android, where loopback is not isolated
+    between apps, that let any installed app POST credentials into this
+    app's data directory. A token minted per run closes that gap — but only
+    if a caller with no key cannot get one by fetching an unguarded page and
+    reading it out of the HTML; that composition is what
+    test_a_caller_without_the_key_cannot_bootstrap_a_token exists to prove,
+    not just that /api/* is gated and pages carry the token.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["OURCAL_DEMO"] = "1"
+        cls.server = ourcal.make_server(0)
+        cls.port = cls.server.server_address[1]
+        cls.t = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.t.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        self._tmp_data()
+
+    def _req(self, path, token=None, method="GET", body=None):
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["X-OurCal-Token"] = token
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(body).encode() if body is not None else None,
+            method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def test_api_without_the_token_is_refused(self):
+        status, _ = self._req("/api/events")
+        self.assertEqual(status, 403)
+
+    def test_api_with_a_wrong_token_is_refused(self):
+        status, _ = self._req("/api/events", token="not-the-token")
+        self.assertEqual(status, 403)
+
+    def test_api_with_the_right_token_succeeds(self):
+        status, body = self._req("/api/events", token=ourcal.SESSION_TOKEN)
+        self.assertEqual(status, 200)
+        self.assertIn("events", json.loads(body))
+
+    def test_a_post_without_the_token_is_refused(self):
+        status, _ = self._req("/api/import", method="POST",
+                              body={"bundle": "x", "passphrase": "y"})
+        self.assertEqual(status, 403)
+
+    def test_navigations_require_the_key_in_the_url(self):
+        # Renamed from test_navigations_do_not_need_the_token, which asserted
+        # the false half of the bug this class exists to catch: navigations
+        # DO need the token now, carried as ?k= rather than a header, because
+        # a header is not something a page load can attach to itself. This is
+        # how the token reaches the page in the first place.
+        for path in ("/", "/setup"):
+            status, _ = self._req(f"{path}?k={ourcal.SESSION_TOKEN}")
+            self.assertEqual(status, 200, path)
+
+    def test_a_non_ascii_key_is_refused_not_a_500(self):
+        # compare_digest raises TypeError for a str with non-ASCII
+        # characters instead of returning False. Before encoding both sides
+        # to bytes, this one wrong key behaved differently from every other
+        # wrong key: do_GET's blanket except turned the TypeError into a 500
+        # that echoed the interpreter's message back to the caller. Access
+        # was still denied either way, so this isn't a bypass — but a wrong
+        # key must 403 like any other wrong key, not 500.
+        key = urllib.parse.quote("café-δοκιμή")
+        for path in ("/", "/setup"):
+            status, body = self._req(f"{path}?k={key}")
+            self.assertEqual(status, 403, path)
+            self.assertNotIn("non-ASCII", body, path)
+
+    def test_a_caller_without_the_key_cannot_bootstrap_a_token(self):
+        # The hole this token exists to close. A native caller passes the
+        # Host/Origin checks by construction, so if it can fetch a page it can
+        # read the token out of the HTML and replay it. Both halves of that
+        # were separately asserted as correct; nothing asserted the
+        # composition. It is the same shape as the is_android() bug: a green
+        # test proving one side of a property, silent about the side that
+        # matters.
+        status, body = self._req("/")
+        self.assertEqual(status, 403)
+        self.assertNotIn(ourcal.SESSION_TOKEN, body)
+        status, body = self._req("/setup")
+        self.assertEqual(status, 403)
+        self.assertNotIn(ourcal.SESSION_TOKEN, body)
+
+    def test_both_pages_carry_the_real_token_not_the_placeholder(self):
+        for path in ("/", "/setup"):
+            _, body = self._req(f"{path}?k={ourcal.SESSION_TOKEN}")
+            self.assertIn(ourcal.SESSION_TOKEN, body, path)
+            self.assertNotIn("__SESSION_TOKEN__", body, path)
+
+    def test_the_token_is_not_trivially_guessable(self):
+        self.assertGreaterEqual(len(ourcal.SESSION_TOKEN), 32)
+        self.assertNotIn(ourcal.SESSION_TOKEN, ("", "None", "token"))
+
+    def test_the_navigation_exemption_is_an_allowlist_not_a_prefix_check(self):
+        # _api_token_ok exempts exactly "/" and "/setup" (query string aside)
+        # when the ?k= key matches, not "anything that doesn't start with
+        # /api/". A path that merely avoids the /api/ prefix without being
+        # one of the two real navigations must still require the header
+        # token — the query key does nothing for it.
+        for path in ("/api", "/setup/../api/events"):
+            status, _ = self._req(f"{path}?k={ourcal.SESSION_TOKEN}")
+            self.assertEqual(status, 403, path)
+        for path in ("/", "/setup"):
+            status, _ = self._req(f"{path}?k={ourcal.SESSION_TOKEN}")
+            self.assertEqual(status, 200, path)
+
+
+class TestBundledCredentials(_TmpData, unittest.TestCase):
+    """The APK ships an OAuth client so a fresh install can sign in with
+    no computer. A pasted client must still win, so bring-your-own keeps
+    working for anyone who prefers their own Google Cloud project."""
+
+    def test_none_when_nothing_is_bundled(self):
+        self._tmp_data()
+        self.assertIsNone(ourcal.bundled_credentials())
+
+    def test_reads_a_bundled_client_from_beside_the_module(self):
+        # The desktop path: pkgutil finds nothing for a top-level module, so
+        # the plain-path fallback is what answers.
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "resources"))
+        with open(os.path.join(tmp, ourcal.BUNDLED_CLIENT), "w",
+                  encoding="utf-8") as f:
+            f.write('{"installed": {"client_id": "FROM-DISK"}}')
+        real = ourcal.APP_DIR
+        ourcal.APP_DIR = tmp
+        self.addCleanup(lambda: setattr(ourcal, "APP_DIR", real))
+        self.assertIn("FROM-DISK", ourcal.bundled_credentials())
+
+    def test_reads_a_bundled_client_through_the_package_loader(self):
+        # The Android path: Chaquopy serves app files through its loader, so
+        # pkgutil.get_data answers and the plain path is never reached. tz()
+        # relies on the same mechanism for tzdata.
+        import pkgutil
+        real = pkgutil.get_data
+        pkgutil.get_data = lambda pkg, res: (
+            b'{"installed": {"client_id": "FROM-LOADER"}}'
+            if res == ourcal.BUNDLED_CLIENT else None)
+        self.addCleanup(lambda: setattr(pkgutil, "get_data", real))
+        self.assertIn("FROM-LOADER", ourcal.bundled_credentials())
+
+    def test_a_corrupt_bundled_file_is_treated_as_absent(self):
+        # UnicodeDecodeError is a ValueError, not an OSError — a corrupt
+        # bundled file must fall through to None, not a raw traceback that
+        # would surface through client_config_text() and creds_for().
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "resources"))
+        with open(os.path.join(tmp, ourcal.BUNDLED_CLIENT), "wb") as f:
+            f.write(b"\xff\xfe\x00bad-utf8")
+        real = ourcal.APP_DIR
+        ourcal.APP_DIR = tmp
+        self.addCleanup(lambda: setattr(ourcal, "APP_DIR", real))
+        self.assertIsNone(ourcal.bundled_credentials())
+
+    def test_a_pasted_client_wins_over_the_bundled_one(self):
+        tmp = self._tmp_data()
+        with open(os.path.join(tmp, "credentials.json"), "w",
+                  encoding="utf-8") as f:
+            f.write('{"installed": {"client_id": "PASTED"}}')
+        real = ourcal.bundled_credentials
+        ourcal.bundled_credentials = lambda: '{"installed": {"client_id": "BUNDLED"}}'
+        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
+        self.assertIn("PASTED", ourcal.client_config_text())
+        self.assertNotIn("BUNDLED", ourcal.client_config_text())
+
+    def test_falls_back_to_the_bundled_client(self):
+        self._tmp_data()          # nothing pasted
+        real = ourcal.bundled_credentials
+        ourcal.bundled_credentials = lambda: '{"installed": {"client_id": "BUNDLED"}}'
+        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
+        self.assertIn("BUNDLED", ourcal.client_config_text())
+
+    def test_raises_the_existing_message_when_there_is_no_client_at_all(self):
+        self._tmp_data()
+        real = ourcal.bundled_credentials
+        ourcal.bundled_credentials = lambda: None
+        self.addCleanup(lambda: setattr(ourcal, "bundled_credentials", real))
+        with self.assertRaises(FileNotFoundError) as cm:
+            ourcal.client_config_text()
+        self.assertIn("credentials.json is missing", str(cm.exception))
+
+
+class TestFirstRunAddAccount(_TmpData, unittest.TestCase):
+    """A fresh install has no accounts.json, so ACCOUNTS holds the
+    Personal/you@example.com and Work/you@work.example.com placeholders. Before
+    this fix, add_account seeded `proposed` from ACCOUNTS, so a stranger's
+    first action — adding "Work", the exact label the design's own mock-up
+    uses — collided with the placeholder of the same name and failed with
+    "That account is invalid or already added", an account they never added.
+    A non-colliding label would have been worse: it would have materialised
+    both placeholders into a real accounts.json.
+    """
+
+    def setUp(self):
+        self.tmp = self._tmp_data()   # no accounts.json written here
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+        # Exactly what a fresh install's ACCOUNTS holds: the module-level
+        # placeholders, resolved because no accounts.json exists yet.
+        ourcal.ACCOUNTS = [
+            {"label": "Personal", "email": "you@example.com"},
+            {"label": "Work", "email": "you@work.example.com"},
+        ]
+
+    def test_adding_work_on_a_fresh_install_succeeds(self):
+        r = ourcal.add_account("Work", "me@gmail.com")
+        self.assertTrue(r["ok"], r)
+
+    def test_the_first_real_account_replaces_the_placeholders(self):
+        ourcal.add_account("Work", "me@gmail.com")
+        self.assertEqual(
+            [a["label"] for a in ourcal.ACCOUNTS], ["Work"])
+        with open(os.path.join(self.tmp, "accounts.json"),
+                  encoding="utf-8") as f:
+            written = json.load(f)
+        self.assertEqual(written, [{"label": "Work", "email": "me@gmail.com"}])
+
+
+class TestAccountsEditor(_TmpData, unittest.TestCase):
+    """accounts.json is a text file you edit by hand. On a phone you
+    cannot, so a downloader could never name an account to sign in to."""
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+        ourcal.ACCOUNTS = [{"label": "One", "email": "one@example.com"}]
+        with open(os.path.join(self.tmp, "accounts.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(ourcal.ACCOUNTS, f)
+
+    def test_add_appends_and_reloads(self):
+        r = ourcal.add_account("Two", "two@example.com")
+        self.assertTrue(r["ok"])
+        self.assertEqual([a["label"] for a in ourcal.ACCOUNTS], ["One", "Two"])
+
+    def test_add_rejects_a_blank_label(self):
+        r = ourcal.add_account("   ", "two@example.com")
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(ourcal.ACCOUNTS), 1)
+
+    def test_add_rejects_a_bad_address(self):
+        r = ourcal.add_account("Two", "not-an-address")
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(ourcal.ACCOUNTS), 1)
+
+    def test_add_rejects_a_label_that_collides_after_slugging(self):
+        # "one!" slugs to "one", which would share One's token file.
+        r = ourcal.add_account("one!", "two@example.com")
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(ourcal.ACCOUNTS), 1)
+
+    def test_remove_deletes_the_account_and_its_token(self):
+        ourcal.add_account("Two", "two@example.com")
+        tok = ourcal.token_path("Two")
+        with open(tok, "w", encoding="utf-8") as f:
+            f.write("{}")
+        r = ourcal.remove_account("Two")
+        self.assertTrue(r["ok"])
+        self.assertEqual([a["label"] for a in ourcal.ACCOUNTS], ["One"])
+        self.assertFalse(os.path.exists(tok))   # no live refresh token left
+
+    def test_remove_refuses_the_last_account(self):
+        # An empty list makes parse_accounts return None, load_accounts
+        # return None, and `or ACCOUNTS` restore the Personal/Work
+        # placeholders — the app would show two accounts nobody added.
+        r = ourcal.remove_account("One")
+        self.assertFalse(r["ok"])
+        self.assertIn("at least one account", r["error"])
+        self.assertEqual([a["label"] for a in ourcal.ACCOUNTS], ["One"])
+
+    def test_remove_an_unknown_label_is_refused(self):
+        r = ourcal.remove_account("Nope")
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(ourcal.ACCOUNTS), 1)
+
+
+class TestSignInEndpoint(_TmpData, unittest.TestCase):
+    """Signing in used to happen inside the agenda request and block it
+    for up to 300s per account. On a phone that is a frozen screen."""
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        real = ourcal.ACCOUNTS
+        self.addCleanup(lambda: setattr(ourcal, "ACCOUNTS", real))
+        ourcal.ACCOUNTS = [{"label": "One", "email": "one@example.com"}]
+        ourcal._SIGNIN.update({"label": None, "state": "idle", "message": ""})
+        self.addCleanup(lambda: ourcal._SIGNIN.update(
+            {"label": None, "state": "idle", "message": ""}))
+
+    def _fake_flow(self, result=None, boom=None):
+        def run(label, email):
+            if boom:
+                raise boom
+            with open(ourcal.token_path(label), "w", encoding="utf-8") as f:
+                f.write(result or "{}")
+        real = ourcal._run_signin
+        ourcal._run_signin = run
+        self.addCleanup(lambda: setattr(ourcal, "_run_signin", real))
+
+    def test_starts_and_reaches_done(self):
+        self._fake_flow()
+        self.assertTrue(ourcal.start_signin("One")["ok"])
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "done")
+        self.assertTrue(os.path.exists(ourcal.token_path("One")))
+
+    def test_a_failure_reaches_error_with_its_message(self):
+        self._fake_flow(boom=RuntimeError("no network"))
+        ourcal.start_signin("One")
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "error")
+        self.assertIn("no network", s["message"])
+
+    def test_a_second_signin_while_one_runs_is_refused(self):
+        ourcal._SIGNIN.update({"label": "One", "state": "waiting"})
+        r = ourcal.start_signin("One")
+        self.assertFalse(r["ok"])
+        self.assertIn("already running", r["error"])
+
+    def test_an_unknown_label_is_refused(self):
+        r = ourcal.start_signin("Nope")
+        self.assertFalse(r["ok"])
+        self.assertEqual(ourcal.signin_status()["state"], "idle")
+
+    def test_a_timed_out_flow_gets_the_spec_message(self):
+        # An abandoned browser tab makes run_local_server raise a timeout
+        # after 300s (fix for the desktop branch waiting forever otherwise);
+        # the raw library text is not something to show on a phone screen.
+        self._fake_flow(boom=TimeoutError("Authorization flow timed out"))
+        ourcal.start_signin("One")
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "error")
+        self.assertEqual(s["message"],
+                          "Timed out waiting for Google — tap Sign in again.")
+
+    def test_a_dns_failure_gets_the_spec_message(self):
+        self._fake_flow(boom=OSError("[Errno -2] Name or service not known"))
+        ourcal.start_signin("One")
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "error")
+        self.assertEqual(s["message"],
+                          "Couldn't reach Google — check your connection "
+                          "and try again.")
+
+    def test_a_macos_dns_failure_gets_the_spec_message(self):
+        # macOS's own wording for the same failure — distinct from glibc's
+        # "Name or service not known" the test above covers. The .dmg is
+        # this project's primary distribution today, so macOS is the
+        # platform where the raw OSError actually reaches a user; requests
+        # may wrap it, hence matching on the text via str(e).
+        self._fake_flow(boom=OSError(
+            "[Errno 8] nodename nor servname provided, or not known"))
+        ourcal.start_signin("One")
+        for _ in range(50):
+            if ourcal.signin_status()["state"] != "waiting":
+                break
+            time.sleep(0.05)
+        s = ourcal.signin_status()
+        self.assertEqual(s["state"], "error")
+        self.assertEqual(s["message"],
+                          "Couldn't reach Google — check your connection "
+                          "and try again.")
+
+
+class TestSignInAccountCheck(_TmpData, unittest.TestCase):
+    """The consent screen shows only the address, and it looks identical for
+    every account — picking the wrong one is easy. Before this check,
+    _run_signin wrote whatever token came back regardless of who it
+    belonged to, filing a stranger's token under this label and reporting
+    it as success.
+
+    google_auth_oauthlib and googleapiclient are optional runtime deps not
+    installed where the suite runs (see CONTRIBUTING.md — CI runs tests
+    before either is installed), so both are stubbed via sys.modules
+    rather than required. run_oauth_flow is monkeypatched, same as the
+    existing off-android test for it.
+    """
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        with open(os.path.join(self.tmp, "credentials.json"), "w",
+                  encoding="utf-8") as f:
+            f.write('{"installed": {"client_id": "cid"}}')
+
+        import sys
+        import types
+
+        class _FakeInstalledAppFlow:
+            @classmethod
+            def from_client_config(cls, config, scopes):
+                return cls()
+
+        flow_mod = types.ModuleType("google_auth_oauthlib.flow")
+        flow_mod.InstalledAppFlow = _FakeInstalledAppFlow
+        oauthlib_pkg = types.ModuleType("google_auth_oauthlib")
+        disc_mod = types.ModuleType("googleapiclient.discovery")
+        apiclient_pkg = types.ModuleType("googleapiclient")
+        stubs = {
+            "google_auth_oauthlib": oauthlib_pkg,
+            "google_auth_oauthlib.flow": flow_mod,
+            "googleapiclient": apiclient_pkg,
+            "googleapiclient.discovery": disc_mod,
+        }
+        originals = {name: sys.modules.get(name) for name in stubs}
+        sys.modules.update(stubs)
+
+        def _restore():
+            for name, mod in originals.items():
+                if mod is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = mod
+        self.addCleanup(_restore)
+        self.disc_mod = disc_mod
+
+        class _Creds:
+            def to_json(self):
+                return '{"token": "tok"}'
+        real_flow = ourcal.run_oauth_flow
+        ourcal.run_oauth_flow = lambda flow: _Creds()
+        self.addCleanup(lambda: setattr(ourcal, "run_oauth_flow", real_flow))
+
+    def _serving(self, primary_email):
+        # pageToken=None accepted (and ignored, one page): the pagination fix
+        # calls .list(pageToken=page_token) on every iteration, matching
+        # list_account_events's identical loop.
+        class _Cals:
+            def list(self, pageToken=None):
+                return self
+
+            def execute(self):
+                return {"items": [{"id": primary_email, "primary": True}]}
+
+        class _Svc:
+            def calendarList(self):
+                return _Cals()
+        self.disc_mod.build = lambda *a, **kw: _Svc()
+
+    def _serving_no_primary(self):
+        class _Cals:
+            def list(self, pageToken=None):
+                return self
+
+            def execute(self):
+                return {"items": [{"id": "team@group.calendar.google.com",
+                                   "selected": True}]}
+
+        class _Svc:
+            def calendarList(self):
+                return _Cals()
+        self.disc_mod.build = lambda *a, **kw: _Svc()
+
+    def test_a_mismatched_account_is_refused_and_writes_no_token(self):
+        self._serving("someone.else@example.com")
+        with self.assertRaises(RuntimeError) as cm:
+            ourcal._run_signin("One", "one@example.com")
+        self.assertIn("someone.else@example.com", str(cm.exception))
+        self.assertIn("one@example.com", str(cm.exception))
+        self.assertFalse(os.path.exists(ourcal.token_path("One")))
+
+    def test_a_matching_account_writes_the_token(self):
+        self._serving("one@example.com")
+        ourcal._run_signin("One", "one@example.com")
+        self.assertTrue(os.path.exists(ourcal.token_path("One")))
+
+    def test_the_written_token_is_owner_only(self):
+        # FIX 3: _run_signin used a plain open(path, "w"), landing at 0644 on
+        # a default umask — the same secret write_user_files always made
+        # 0600. Both writers must agree now that both route through
+        # write_secret_file.
+        import stat
+        self._serving("one@example.com")
+        ourcal._run_signin("One", "one@example.com")
+        mode = stat.S_IMODE(os.stat(ourcal.token_path("One")).st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_a_primary_calendar_on_a_later_page_is_still_checked(self):
+        # The bug: calendarList().list() was unpaginated, so an account whose
+        # primary calendar fell on page 2 made primary_email() return "" and
+        # silently skipped the mismatch check below — the exact check this
+        # whole flow exists to run. Fails open, not closed. This fakes a
+        # two-page response where the mismatch is only visible on page 2, and
+        # proves both pages actually get walked.
+        calls = []
+
+        class _Cals:
+            def list(self, pageToken=None):
+                calls.append(pageToken)
+                return self
+
+            def execute(self):
+                if len(calls) == 1:
+                    return {"items": [{"id": "other@x.com", "selected": True}],
+                            "nextPageToken": "p2"}
+                return {"items": [{"id": "someone.else@example.com",
+                                   "primary": True}]}
+
+        class _Svc:
+            def calendarList(self):
+                return _Cals()
+        self.disc_mod.build = lambda *a, **kw: _Svc()
+
+        with self.assertRaises(RuntimeError) as cm:
+            ourcal._run_signin("One", "one@example.com")
+        self.assertIn("someone.else@example.com", str(cm.exception))
+        self.assertEqual(calls, [None, "p2"])   # both pages were walked
+        self.assertFalse(os.path.exists(ourcal.token_path("One")))
+
+    def test_writes_the_token_when_the_primary_calendar_is_undeterminable(self):
+        # Deliberate, documenting the same fallback account_mismatch uses
+        # elsewhere (see TestAccountIdentity.test_no_error_when_primary_
+        # undeterminable): if no primary calendar is ever returned at all,
+        # the account cannot be identified, and the check does not block the
+        # user on a guess. This is NOT the page-2 bug above — full pagination
+        # ran and genuinely found no primary calendar anywhere.
+        self._serving_no_primary()
+        ourcal._run_signin("One", "one@example.com")
+        self.assertTrue(os.path.exists(ourcal.token_path("One")))
+
+
+class TestNeedsSignIn(_TmpData, unittest.TestCase):
+    """Loading the agenda must never open a browser. It did, four times,
+    sequentially, inside one HTTP request.
+
+    google-auth is an optional runtime dep not installed where the suite
+    runs (CONTRIBUTING.md; CI installs neither it nor google-auth-oauthlib
+    before testing), so its two modules that creds_for imports at its top —
+    google.oauth2.credentials and google.auth.transport.requests — are
+    stubbed via sys.modules, same as TestSignInAccountCheck does for the
+    modules _run_signin imports. The account here has no token file, so
+    neither stand-in's attribute is ever called; it only needs to exist.
+    """
+
+    def setUp(self):
+        self.tmp = self._tmp_data()
+        with open(os.path.join(self.tmp, "credentials.json"), "w",
+                  encoding="utf-8") as f:
+            f.write('{"installed": {"client_id": "x"}}')
+
+        import sys
+        import types
+
+        google_pkg = types.ModuleType("google")
+        oauth2_pkg = types.ModuleType("google.oauth2")
+        credentials_mod = types.ModuleType("google.oauth2.credentials")
+        credentials_mod.Credentials = type("Credentials", (), {})
+        auth_pkg = types.ModuleType("google.auth")
+        transport_pkg = types.ModuleType("google.auth.transport")
+        requests_mod = types.ModuleType("google.auth.transport.requests")
+        requests_mod.Request = type("Request", (), {})
+        stubs = {
+            "google": google_pkg,
+            "google.oauth2": oauth2_pkg,
+            "google.oauth2.credentials": credentials_mod,
+            "google.auth": auth_pkg,
+            "google.auth.transport": transport_pkg,
+            "google.auth.transport.requests": requests_mod,
+        }
+        originals = {name: sys.modules.get(name) for name in stubs}
+        sys.modules.update(stubs)
+
+        def _restore():
+            for name, mod in originals.items():
+                if mod is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = mod
+        self.addCleanup(_restore)
+
+    def test_creds_for_raises_instead_of_launching_a_browser(self):
+        launched = []
+        real = ourcal.run_oauth_flow
+        ourcal.run_oauth_flow = lambda flow: launched.append(1)
+        self.addCleanup(lambda: setattr(ourcal, "run_oauth_flow", real))
+        with self.assertRaises(ourcal.NeedsSignIn):
+            ourcal.creds_for("One", "one@example.com")
+        self.assertEqual(launched, [])      # nothing opened
+
+    def test_the_error_entry_is_flagged_for_sign_in(self):
+        real = ourcal.service_for
+        ourcal.service_for = lambda label, email: (_ for _ in ()).throw(
+            ourcal.NeedsSignIn("One"))
+        self.addCleanup(lambda: setattr(ourcal, "service_for", real))
+        _, err = ourcal.list_account_events("One", "one@example.com", "a", "b")
+        self.assertTrue(err["signin"])
+        self.assertFalse(err["setup"])      # setup is fine; sign-in is not
 
 
 if __name__ == "__main__":

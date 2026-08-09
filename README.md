@@ -3,8 +3,8 @@
 **A unified calendar dashboard for every Google account you own.**
 
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
-![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
-![Tests](https://img.shields.io/badge/tests-206-brightgreen)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Android-lightgrey)
+![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-2-brightgreen)
 
 OurCal brings **all calendars from all of your Google accounts** into a single
@@ -38,9 +38,11 @@ No Google account, no setup, nothing to configure:
 OURCAL_DEMO=1 python3 ourcal.py
 ```
 
-Open <http://127.0.0.1:8756>. Demo mode serves realistic fixtures and every flow
-is clickable — create, edit, sync and delete all work against an in-memory
-store, so it is the safe place to try deleting something.
+This opens your browser to the dashboard automatically. If it doesn't, use
+the URL printed in the terminal — a bare `http://127.0.0.1:8756` (no `?k=`
+key) now returns 403 by design. Demo mode serves realistic fixtures and
+every flow is clickable — create, edit, sync and delete all work against an
+in-memory store, so it is the safe place to try deleting something.
 
 ## Install
 
@@ -84,13 +86,56 @@ download a Desktop OAuth client as `credentials.json`.
 
 Full walkthrough: **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.
 
-Shipping a shared client secret inside a published app would get it revoked and
-route every user's calendar traffic through one quota — which is why this step
-cannot be done for you.
+Building for Android is the exception: `packaging/build-android.sh` ships an
+OAuth client inside the APK when it finds `credentials.json` in the working
+tree, so that install can add an account and sign in with no computer at all
+once it's on the phone — see [On Android: sign in on the
+device](SETUP_GUIDE.md#on-android-sign-in-on-the-device). That doesn't change
+what you do here. `credentials.json` is an app identity, not an account key —
+it holds a client id and secret and no refresh token, and Google issues a
+token only once a person signs in and consents, so an extracted secret
+reaches nobody's Google account. What it does permit is impersonation (a fake
+app showing "OurCal" on a genuine consent screen), the project's request
+quota, and revocation if either is abused, which breaks sign-in for everyone
+until a new client is issued and users re-authorise. A pasted
+`credentials.json` still takes precedence over the bundled one, so bringing
+your own Google Cloud project is unaffected. Running from source never
+bundles a client, so the steps above are unchanged there.
 
 Put `credentials.json` and `accounts.json` in `~/Library/Application
 Support/OurCal/` for the packaged app, or next to `ourcal.py` when running from
 source.
+
+### On Android
+
+Two ways to get going on the phone.
+
+**If you built the APK yourself with `credentials.json` present** — there's
+no official Android release yet, see [Development](#development) —
+`packaging/build-android.sh` bundles the client for you, so you can add an
+account and sign in right on the phone, no computer needed. Full walkthrough:
+[On Android: sign in on the
+device](SETUP_GUIDE.md#on-android-sign-in-on-the-device).
+
+**To bring across a setup you already have on a Mac** — your own Google Cloud
+project, or accounts you'd rather not sign in to twice — move it across
+instead. The Google Cloud step itself still needs a computer; a phone cannot
+realistically create a project and download a client:
+
+```bash
+./ourcal.py --export | pbcopy      # choose a passphrase when asked
+```
+
+Send yourself the bundle, open OurCal on the phone, tap **Set up this device**,
+paste it in, and enter the same passphrase. Your accounts appear without a
+restart.
+
+The bundle is encrypted, but it carries live Google refresh tokens. Use a
+passphrase you would use for a password, and delete the message afterwards.
+
+Android 11+ hides `Android/data` from every file manager and from MTP, so
+copying the files onto the phone directly is not possible — pasting the
+bundle in is how this route works around that.
 
 ## Features
 
@@ -158,7 +203,7 @@ TIMEZONE = "America/Los_Angeles"
 DAYS_AHEAD = 30
 POLL_MINUTES = 5
 PORT = 8756
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 ```
 
 ## Development
@@ -167,7 +212,7 @@ VERSION = "1.0.0"
 python3 -m unittest discover tests -v
 ```
 
-217 tests, no Google credentials or network needed — the suite runs in demo mode
+No Google credentials or network needed — the full suite runs in demo mode
 against in-memory fixtures.
 
 | Task | Command |
@@ -186,8 +231,7 @@ matching tag (`git tag v1.0.1 && git push origin v1.0.1`) or running the release
 workflow manually. The workflow refuses to build when the tag and `VERSION`
 disagree.
 
-Android support is proven but not yet built — see
-[NOTES-android.md](NOTES-android.md).
+Android has no release job yet — `.github/workflows/release.yml` builds the `.dmg` only. Build it from source instead: `./packaging/build-android.sh` produces `dist/OurCal-<version>-android.apk`, which you sideload yourself (Play Protect will warn on install; tapping "Install anyway" proceeds). That APK is currently debug-signed — the Android SDK's shared debug keystore, with `debuggable=true` — which is fine for a personal build but a known gap before this could be handed to anyone else; see ["Follow-on: the debug APK undercuts Part 0"](docs/superpowers/specs/2026-08-07-android-setup-import-design.md#follow-on-the-debug-apk-undercuts-part-0) for what that gap actually is. [NOTES-android.md](NOTES-android.md) covers the earlier OAuth-on-Android spike, Play Protect, build cost and the shape of the migration — not the signing gap.
 
 ## Privacy
 
