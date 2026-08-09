@@ -119,25 +119,71 @@ Double-click **`OurCal.command`**, or from a terminal in this folder:
 python3 ourcal.py
 ```
 
-On the very first run OurCal will:
+On the very first run OurCal creates a private `.ourcal-venv/` next to the app
+and installs its two dependencies (`google-api-python-client`,
+`google-auth-oauthlib`), then relaunches itself from that venv. (This happens
+once; later runs are instant.)
 
-1. Create a private `.ourcal-venv/` next to the app and install its two
-   dependencies (`google-api-python-client`, `google-auth-oauthlib`), then
-   relaunch itself from that venv. (This happens once; later runs are instant.)
-2. Open your browser to sign in — **once per account**. Before each prompt the
-   terminal prints which address that prompt is for:
-   ```
-   OurCal: sign in as you.second@example.com   (account “Side”)
-           Pick this exact account in the browser window.
-   ```
-   **Read the terminal before choosing** — Google's prompts look identical,
-   and if you're already signed into several accounts the chooser order will not
-   match OurCal's. Each sign-in writes a `token_<label>.json` so you won't be
-   asked again. If you pick the wrong one, OurCal detects it and tells you which
-   token file to delete rather than silently mislabeling that account's events.
+Open <http://127.0.0.1:8756>. **Nothing signs you in automatically** — each
+account you haven't authorised yet shows a banner with a **Sign in** link.
+Click it (it opens `/setup`), then click that account's own **Sign in**
+button there. OurCal only runs one Google sign-in at a time, so do this once
+per account: each click opens a fresh consent screen in your browser —
+approve calendar access, and the tab confirms when it's done. OurCal checks
+that the account you actually reached matches the address in `accounts.json`
+*before* writing anything, so picking the wrong one at the prompt is caught —
+the page names the address to pick instead of silently filing that account's
+events under the wrong label.
 
-When it's done, open <http://127.0.0.1:8756>. Your unified agenda for the next
-30 days appears and refreshes every 5 minutes (or immediately via **Refresh**).
+As each account finishes, OurCal writes its `token_<label>.json` so you won't
+be asked again. Once every account you care about is signed in, your unified
+agenda for the next 30 days appears and refreshes every 5 minutes (or
+immediately via **Refresh**).
+
+---
+
+## On Android: sign in on the device
+
+Everything above assumes a Mac or a source checkout, and ends with you
+pasting a `credentials.json` you downloaded yourself. Skip all of that if
+you're running an APK built with one bundled in — `./packaging/build-android.sh`
+prints **"bundling the OAuth client"** when it copies one in from the working
+tree. A fresh install of that APK can add an account and sign in to Google
+with no computer at all:
+
+1. Open OurCal and tap **Set up this device** (the footer link) — or tap
+   **Sign in** on any account's banner, which lands on the same page.
+   Either way you're now on `/setup`.
+2. Under **Accounts**, enter a name (e.g. `Work`) and the Gmail address, then
+   tap **Add**. The account appears in the list, marked **not signed in**.
+
+   If this is a brand-new device with no `accounts.json` yet, OurCal starts
+   you off with two placeholders, `Personal` (`you@example.com`) and `Work`
+   (`you@work.example.com`). Adding your first real account doesn't replace
+   them — it appends to the list. Remove both placeholders with their
+   **Remove** button once you've added your own, or they sit there as
+   "not signed in" banners you can never sign in to.
+3. Tap that account's **Sign in** button. The page says *"Opening Google…
+   finish there, then come back to this app,"* and your browser opens
+   Google's account picker.
+4. OurCal's bundled project is published but not verified by Google —
+   verification needs a domain and a privacy policy this project doesn't
+   have — so you'll land on a red **"Google hasn't verified this app"**
+   screen. That's expected, and unlike Steps 1–4 above, nobody needs to be
+   added as a test user first: any Google account can get past it. Tap
+   **Advanced**, then **Go to OurCal (unsafe)**, then grant calendar access.
+5. **Switch back to OurCal.** Android suspends a backgrounded app's network,
+   and stepping into the browser backgrounds OurCal — so it's waiting for
+   the network to return before it can finish exchanging the code Google
+   just issued. Returning to the app is what lets that finish. Within a few
+   seconds the setup page shows **Signed in.**, the row flips to **✓ signed
+   in**, and the agenda fills without a restart.
+
+Prefer your own Google Cloud project to the bundled client? A pasted
+`credentials.json` always takes precedence over the bundled one, so Steps
+1–4 above still work on Android: export a bundle from a Mac that already has
+your `credentials.json` (`./ourcal.py --export | pbcopy`) and paste it in
+under **2 · Bundle** on the same `/setup` page.
 
 ---
 
@@ -149,11 +195,24 @@ is renamed to exactly `credentials.json` and sits next to `ourcal.py`. One
 banner per account is normal here; they all share the same cause.
 
 **An account shows `signed in as <X>, not <Y> — delete token_<label>.json`.**
-You picked the wrong Google account at that prompt, so its token is filed under
-the wrong label. OurCal refuses to use it rather than stamping that account's
-events with the wrong badge. Delete the named token file, restart, and pick the
-account the terminal names — each prompt now prints which address it wants
-before opening the browser. Watch the terminal, not just the browser.
+This account already has a token file, but it was signed in as a different
+Google account than the one in `accounts.json`. OurCal refuses to use it
+rather than stamping that account's events with the wrong badge. Delete the
+named token file, then click that account's **Sign in** button again (from
+its banner, or on `/setup`) and pick `<Y>` this time.
+
+**Sign-in says `Signed in as <X>, not <Y> — tap Sign in again and pick <Y>`.**
+The on-device version of the message above: you picked the wrong account in
+Google's picker *during* a sign-in you just started. OurCal checks the
+account it actually reached before writing a token, so — unlike the older
+message — nothing gets filed under the wrong label; no token is written at
+all. Tap **Sign in** again and choose `<Y>` this time.
+
+**Sign-in says `Another sign-in is already running — finish it first.`**
+OurCal runs one Google sign-in at a time — it briefly binds a local port
+waiting for Google's redirect, and a second one at once would collide. Wait
+for the sign-in you already started to finish (or fail, or time out after 5
+minutes), then tap **Sign in** again.
 
 **The dashboard shows events I don't recognize, and only two accounts
 (`Personal` / `Work` on `example.com` addresses).**
@@ -163,8 +222,12 @@ built-in fixtures instead of touching Google at all. Stop it (`Ctrl-C`, or
 `python3 ourcal.py`.
 
 **"Google hasn't verified this app" warning.**
-Expected while the consent screen is in *Testing* mode. Click **Advanced →
-Go to OurCal (unsafe)** → **Continue**. It's your own app; this is normal.
+Expected — either because your own consent screen is still in *Testing* mode
+(the desktop flow above), or because an Android build's bundled client is
+*Published* but not Google-verified (see ["On Android: sign in on the
+device"](#on-android-sign-in-on-the-device)). Click **Advanced → Go to
+OurCal (unsafe)** → **Continue** either way; it's your own app, this is
+normal.
 
 **An account shows a "re-auth" banner / a calendar is missing.**
 - OurCal only shows calendars that are **selected (visible)** in that account,
@@ -176,18 +239,27 @@ Go to OurCal (unsafe)** → **Continue**. It's your own app; this is normal.
   and run OurCal again.
 
 **Adding a work / Workspace account (e.g. `you@work.example.com`).**
-Append it to `accounts.json`,
-add the address as a test user on the **Audience** page, and restart — OurCal
-will prompt for sign-in once. Be aware that corporate Workspace accounts are
-often restricted by an admin policy that blocks third-party OAuth apps, or that
-prevents adding the address as an external test user. If IT blocks it, that
-account shows a re-auth banner and the others keep working normally; that's an
-org-policy limitation, not an OurCal bug.
+Add it to `accounts.json` (by hand, or via **Accounts** on `/setup`), add the
+address as a test user on the **Audience** page, restart if you edited the
+file by hand, then click **Sign in** for that account. Be aware that
+corporate Workspace accounts are often restricted by an admin policy that
+blocks third-party OAuth apps, or that prevents adding the address as an
+external test user. If IT blocks it, that account shows a re-auth banner and
+the others keep working normally; that's an org-policy limitation, not an
+OurCal bug.
 
 **Removing an account.**
-Stop OurCal, delete its entry from `accounts.json`, delete its
-`token_<label>.json`, then restart. Do it in that order — a still-running OurCal
-holds the old account list in memory and will re-create the token file.
+On `/setup`, tap that account's **Remove** button — one action removes it
+from the list *and* deletes its `token_<label>.json`, so no live refresh
+token is left on the device, and the change takes effect without a restart.
+(You can still do it by hand instead: stop OurCal, delete the entry from
+`accounts.json` and its `token_<label>.json`, then restart — a still-running
+OurCal holds the old account list in memory and would re-create the token
+file.)
+
+Removing your only account is refused, with *"OurCal needs at least one
+account — add the replacement first."* Add the replacement before removing
+the one you no longer want.
 
 **Port 8756 is already in use.**
 Another program (or a previous OurCal) holds the port. Free it with
@@ -198,9 +270,14 @@ Delete all `token_*.json` (re-signs in) and/or `.ourcal-venv/` (re-installs
 deps on next run). `credentials.json` stays.
 
 **On Android, every account says `credentials.json is missing`.**
-The device has not been set up. Tap **Set up this device** in the banner, or
-open `/setup` from the footer link, and paste a bundle from `./ourcal.py
---export`. The footer of that page shows the directory the app resolved: if it
+This APK was built without a bundled OAuth client — a paste-only build (see
+`packaging/build-android.sh`, which prints "no credentials.json — building a
+paste-only APK" when it makes one of these). Tap **Set up this device**, or open
+`/setup` from the footer link, and paste a bundle from `./ourcal.py
+--export`. If instead your accounts show "isn't signed in" rather than this
+message, the client is already bundled — see ["On Android: sign in on the
+device"](#on-android-sign-in-on-the-device) and just tap **Sign in**. The
+footer of the `/setup` page also shows the directory the app resolved: if it
 contains `chaquopy/AssetFinder`, the Android branch is not active and the app
 is running desktop code paths — rebuild from a source tree that includes the
 `is_android()` interpreter probe.

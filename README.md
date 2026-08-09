@@ -84,9 +84,20 @@ download a Desktop OAuth client as `credentials.json`.
 
 Full walkthrough: **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.
 
-Shipping a shared client secret inside a published app would get it revoked and
-route every user's calendar traffic through one quota — which is why this step
-cannot be done for you.
+The Android build is the exception: it ships an OAuth client inside the APK,
+so a fresh install can add an account and sign in with no computer at all —
+see [On Android: sign in on the
+device](SETUP_GUIDE.md#on-android-sign-in-on-the-device). That doesn't change
+what you do here. `credentials.json` is an app identity, not an account key —
+it holds a client id and secret and no refresh token, and Google issues a
+token only once a person signs in and consents, so an extracted secret
+reaches nobody's Google account. What it does permit is impersonation (a fake
+app showing "OurCal" on a genuine consent screen), the project's request
+quota, and revocation if either is abused, which breaks sign-in for everyone
+until a new client is issued and users re-authorise. A pasted
+`credentials.json` still takes precedence over the bundled one, so bringing
+your own Google Cloud project is unaffected. Running from source never
+bundles a client, so the steps above are unchanged there.
 
 Put `credentials.json` and `accounts.json` in `~/Library/Application
 Support/OurCal/` for the packaged app, or next to `ourcal.py` when running from
@@ -94,8 +105,18 @@ source.
 
 ### On Android
 
-The Google Cloud step happens on a computer — a phone cannot realistically
-create a project and download a client. Move the finished setup across instead:
+Two ways to get going on the phone.
+
+**If your build bundles an OAuth client** — an official APK, or your own
+build of `packaging/build-android.sh` with a `credentials.json` present —
+add an account and sign in right there, no computer needed. Full walkthrough:
+[On Android: sign in on the
+device](SETUP_GUIDE.md#on-android-sign-in-on-the-device).
+
+**To bring across a setup you already have on a Mac** — your own Google Cloud
+project, or accounts you'd rather not sign in to twice — move it across
+instead. The Google Cloud step itself still needs a computer; a phone cannot
+realistically create a project and download a client:
 
 ```bash
 ./ourcal.py --export | pbcopy      # choose a passphrase when asked
@@ -109,8 +130,8 @@ The bundle is encrypted, but it carries live Google refresh tokens. Use a
 passphrase you would use for a password, and delete the message afterwards.
 
 Android 11+ hides `Android/data` from every file manager and from MTP, so
-copying the files onto the phone directly is not possible — pasting is not a
-workaround for a missing cable, it is the only supported route.
+copying the files onto the phone directly is not possible — pasting the
+bundle in is how this route works around that.
 
 ## Features
 
