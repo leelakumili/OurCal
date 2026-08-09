@@ -304,3 +304,39 @@ this doc originally described, which appears nowhere in the code.
 - Switching to an Android-type OAuth client.
 - `X-Frame-Options` / `frame-ancestors`, noted as pre-existing in the prior
   design's follow-on.
+
+---
+
+## Known follow-ons, after implementation
+
+Recorded so they survive the scratch workspace.
+
+**`accountsFromFile` checks existence, not parseability.** `setup_status()`
+reports it from `os.path.exists`, while `reload_accounts()` leaves `ACCOUNTS` on
+the placeholders when the file fails `parse_accounts`. So a hand-typo'd
+`accounts.json` reproduces the first-run bug exactly: `/setup` lists `Personal`
+and `Work` as real accounts with live buttons, and the first `add_account` is
+refused as a duplicate. `SETUP_GUIDE.md` explicitly invites hand-editing that
+file, so this is reachable. Keying both `accountsFromFile` and `add_account`'s
+base on "the file parsed" rather than "the file exists" closes it.
+
+**The session key changes every run**, so a bookmarked dashboard URL always
+403s. Documented, but a nicer failure than a bare JSON error would help.
+
+**`write_secret_file`'s temp name is derived from the target**, so two
+concurrent refreshes of the same account share one `.tmp` path and can
+interleave. Same race class as the plain `open()` it replaced — neither better
+nor worse — but `mkstemp` would remove it.
+
+**The release smoke test accepts any listener on the port**, not specifically
+OurCal. Asserting the body is `{"error": "forbidden"}` would tie it to this
+handler at no cost.
+
+**The Join link is the only cross-origin navigation.** Current browser defaults
+send only the origin, not the query, so the key does not leak — but
+`rel="noopener noreferrer"` or a `no-referrer` meta would make that independent
+of a default the app does not control.
+
+**Forward compatibility.** The exact whitelist plus all-or-nothing means adding
+a seventh user file makes newer Macs' bundles unopenable on older phones, with a
+message that reads as corruption. Security-correct; worth wording better.
