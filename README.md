@@ -270,6 +270,37 @@ install ("App blocked to protect your device" — tap **Install anyway**).
 [NOTES-android.md](NOTES-android.md) covers the earlier OAuth-on-Android
 spike, Play Protect, build cost and the shape of the migration.
 
+### Setting up Android release signing
+
+Release signing and the bundled OAuth client are both optional — without them
+the release workflow still builds and publishes a debug-signed, paste-only
+APK on a `workflow_dispatch` run (a **tagged** release refuses to publish at
+all until they're set; see above). A maintainer who wants the real signed
+build creates five repository secrets once, under **Settings → Secrets and
+variables → Actions**:
+
+| Secret | Contents |
+|---|---|
+| `ANDROID_KEYSTORE_B64` | `base64 -i ourcal.jks` |
+| `ANDROID_KEYSTORE_PASSWORD` | the store password |
+| `ANDROID_KEY_ALIAS` | the key alias |
+| `ANDROID_KEY_PASSWORD` | the key password |
+| `ANDROID_OAUTH_CLIENT` | the contents of a Desktop OAuth `credentials.json` |
+
+Generate the keystore once:
+
+```bash
+keytool -genkeypair -v -keystore ourcal.jks -alias ourcal \
+        -keyalg RSA -keysize 4096 -validity 10000
+base64 -i ourcal.jks | pbcopy      # paste as the ANDROID_KEYSTORE_B64 secret
+```
+
+**Back up `ourcal.jks` somewhere durable and never commit it.** This is the
+one unrecoverable mistake available in this project: losing it means no
+future APK can ever install as an update over an existing one again — every
+user who has a signed build installed would have to uninstall it, losing
+their local setup (accounts and tokens), before they could take a new one.
+
 ## Privacy
 
 Everything runs on your own machine. The interface is served only on
