@@ -6,14 +6,10 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release (e.g. 1.0.1). Defaults to VERSION in ourcal.py."
-        required: false
+  workflow_dispatch: {}
 
 permissions:
-  contents: write        # needed to create the release and upload the .dmg
+  contents: write        # needed to create the release and upload the .dmg and .apk
 
 jobs:
   macos:
@@ -98,6 +94,16 @@ jobs:
     # and bills about a tenth of a macOS runner for a job that takes minutes
     # even with warm caches.
     runs-on: ubuntu-latest
+    env:
+      # ubuntu-latest preinstalls an SDK at /usr/local/lib/android/sdk and
+      # points both of these at it. Briefcase checks ANDROID_HOME first and
+      # may adopt that SDK instead of downloading (and caching) its own —
+      # putting apksigner/aapt2 somewhere neither script searches, and
+      # making the outcome a coin flip per run. Pinning both empty forces
+      # Briefcase onto its own cached SDK every time, which is also what
+      # makes the ~/.cache/briefcase cache below actually save anything.
+      ANDROID_HOME: ""
+      ANDROID_SDK_ROOT: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -140,23 +146,33 @@ jobs:
         # Without it the APK is paste-only and the on-device sign-in is
         # unreachable for anyone who downloads it. Absent here it still
         # builds; the release job is what refuses to publish one on a tag.
-        # Recorded in dist/.apk-oauth-client (bundled/missing) alongside
-        # dist/.apk-signing so the release job's gate can read the answer
-        # instead of re-deriving it from a secret it does not have.
+        # Recorded in dist/apk-oauth-client.txt (bundled/missing) alongside
+        # dist/apk-signing.txt so the release job's gate can read the answer
+        # instead of re-deriving it from a secret it does not have. Not
+        # dotfile-prefixed: actions/upload-artifact@v4 (>=4.4.0) excludes
+        # hidden files by default, which silently dropped the old
+        # dist/.apk-signing / dist/.apk-oauth-client markers from the
+        # uploaded artifact entirely — the release job's gate below then
+        # read `cat`'s empty-string fallback and refused every tagged
+        # release, including correctly signed ones.
         env:
           CLIENT: ${{ secrets.ANDROID_OAUTH_CLIENT }}
         run: |
           mkdir -p dist
           if [ -n "$CLIENT" ]; then
             printf '%s' "$CLIENT" > credentials.json
-            echo bundled > dist/.apk-oauth-client
+            echo bundled > dist/apk-oauth-client.txt
             echo "oauth client written"
           else
-            echo missing > dist/.apk-oauth-client
+            echo missing > dist/apk-oauth-client.txt
             echo "no ANDROID_OAUTH_CLIENT — this APK will be paste-only"
           fi
 
       - name: Write the release keystore
+        # See README.md's Development section ("Android release signing")
+        # for how to generate ourcal.jks and where these five secrets come
+        # from — losing ourcal.jks is unrecoverable, so read that before
+        # regenerating one.
         env:
           KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
@@ -207,8 +223,8 @@ jobs:
           name: apk
           path: |
             dist/*.apk
-            dist/.apk-signing
-            dist/.apk-oauth-client
+            dist/apk-signing.txt
+            dist/apk-oauth-client.txt
           if-no-files-found: error
 
   release:
@@ -230,17 +246,48 @@ jobs:
         # something nobody can use: installable and openable, but paste-only,
         # and nobody downloading a release build has a bundle to paste in.
         if: github.ref_type == 'tag'
+        env:
+          # Booleans only — never the secret values themselves — so this can
+          # name exactly which secrets are missing without putting one in a
+          # log. Fixes a real case: with 3 of 4 signing secrets set, the APK
+          # comes back debug-signed and this used to say "set the
+          # ANDROID_KEYSTORE_* secrets", pointing at all four including the
+          # three that were already set.
+          HAVE_KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 != '' }}
+          HAVE_KS_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD != '' }}
+          HAVE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS != '' }}
+          HAVE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD != '' }}
         run: |
-          [ "$(cat dist/.apk-signing)" = release ] || {
-            echo "::error::tagged release but the APK is debug-signed — set the ANDROID_KEYSTORE_* secrets"; exit 1; }
-          [ "$(cat dist/.apk-oauth-client)" = bundled ] || {
+          if [ "$(cat dist/apk-signing.txt)" != release ]; then
+            missing=""
+            [ "$HAVE_KS_B64" = true ]       || missing="$missing ANDROID_KEYSTORE_B64"
+            [ "$HAVE_KS_PASSWORD" = true ]  || missing="$missing ANDROID_KEYSTORE_PASSWORD"
+            [ "$HAVE_KEY_ALIAS" = true ]    || missing="$missing ANDROID_KEY_ALIAS"
+            [ "$HAVE_KEY_PASSWORD" = true ] || missing="$missing ANDROID_KEY_PASSWORD"
+            [ -n "$missing" ] || missing=" (all four are set — the android job's build step failed to sign despite that; check its log)"
+            echo "::error::tagged release but the APK is debug-signed — missing secrets:$missing"
+            exit 1
+          fi
+          [ "$(cat dist/apk-oauth-client.txt)" = bundled ] || {
             echo "::error::tagged release but no OAuth client was bundled — set the ANDROID_OAUTH_CLIENT secret"; exit 1; }
           echo "release-signed APK with a bundled OAuth client confirmed"
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.macos.outputs.version) }}
-          name: OurCal ${{ needs.macos.outputs.version }}
+          # A workflow_dispatch run gets its own tag rather than reusing
+          # "vX.Y.Z" — softprops/action-gh-release updates an existing
+          # release and replaces same-named assets, and the gate above only
+          # guards tags. Without this, pressing the button on main after
+          # v1.0.1 had already shipped would silently replace that published
+          # release's signed .apk with whatever a debug/paste-only dispatch
+          # build produced — the release page would look untouched (same
+          # tag, same title) while the asset underneath it changed. Giving
+          # every dispatch run "vX.Y.Z-dispatch-<run number>" instead makes
+          # each one its own release rather than a body-double for a real
+          # one; run_number keeps repeat dispatches at the same version from
+          # colliding with each other too.
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}-dispatch-{1}', needs.macos.outputs.version, github.run_number) }}
+          name: ${{ github.ref_type == 'tag' && format('OurCal {0}', needs.macos.outputs.version) || format('OurCal {0} (dispatch #{1})', needs.macos.outputs.version, github.run_number) }}
           # The gate above only runs on a tag — a workflow_dispatch build can
           # still land here debug-signed or paste-only. Without this, that
           # build would publish to the same public Releases page and, being
