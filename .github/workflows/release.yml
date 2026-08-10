@@ -272,3 +272,18 @@ jobs:
             ```
 
             Apple Silicon only.
+
+            ## Android
+
+            1. Download the `.apk` below and open it on your phone.
+            2. Play Protect will say **"App blocked to protect your device"** — tap
+               **Install anyway**. It says that because the app is sideloaded rather
+               than from the Play Store, not because anything is wrong with it.
+            3. Open OurCal → **Set up this device** → add an account (a name and your
+               Gmail address) → **Sign in**.
+            4. Google shows **"Google hasn't verified this app"** — tap **Advanced**,
+               then **Go to OurCal**. The consent screen is published but unverified.
+            5. **Come back to OurCal after granting access.** Android cuts a
+               backgrounded app's network, and the sign-in waits for you to return.
+
+            Your calendar data and tokens stay on your phone.

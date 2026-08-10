@@ -67,6 +67,22 @@ signs you out.
 
 Apple Silicon only. To build it yourself: `./packaging/build-app.sh`.
 
+### As an Android app
+
+Download the `.apk` from [Releases](../../releases) and open it on your
+phone to install it. There's no Play Store listing — it's a sideload, so
+Play Protect will say **"App blocked to protect your device"**; tap
+**Install anyway**. That's because the app isn't from the Store, not
+because anything is wrong with it.
+
+The APK bundles its own OAuth client, so you can add an account and sign in
+right on the phone — no computer, no Google Cloud project needed. Full
+walkthrough, including the "Google hasn't verified this app" screen you'll
+also hit: [On Android: sign in on the
+device](SETUP_GUIDE.md#on-android-sign-in-on-the-device).
+
+To build it yourself instead: `./packaging/build-android.sh`.
+
 ### From source
 
 ```bash
@@ -86,10 +102,12 @@ download a Desktop OAuth client as `credentials.json`.
 
 Full walkthrough: **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.
 
-Building for Android is the exception: `packaging/build-android.sh` ships an
-OAuth client inside the APK when it finds `credentials.json` in the working
-tree, so that install can add an account and sign in with no computer at all
-once it's on the phone — see [On Android: sign in on the
+Android is the exception: the `.apk` downloaded from
+[Releases](../../releases) already has an OAuth client bundled in, and so
+does a self-built one — `packaging/build-android.sh` ships one inside the
+APK when it finds `credentials.json` in the working tree — so that install
+can add an account and sign in with no computer at all once it's on the
+phone — see [On Android: sign in on the
 device](SETUP_GUIDE.md#on-android-sign-in-on-the-device). That doesn't change
 what you do here. `credentials.json` is an app identity, not an account key —
 it holds a client id and secret and no refresh token, and Google issues a
@@ -110,11 +128,11 @@ source.
 
 Two ways to get going on the phone.
 
-**If you built the APK yourself with `credentials.json` present** — there's
-no official Android release yet, see [Development](#development) —
-`packaging/build-android.sh` bundles the client for you, so you can add an
-account and sign in right on the phone, no computer needed. Full walkthrough:
-[On Android: sign in on the
+**Using the bundled client** — the default whether you downloaded the `.apk`
+from [Releases](../../releases) or built it yourself with
+`credentials.json` present (`packaging/build-android.sh` bundles the client
+in either way) — add an account and sign in right on the phone, no computer
+needed. Full walkthrough: [On Android: sign in on the
 device](SETUP_GUIDE.md#on-android-sign-in-on-the-device).
 
 **To bring across a setup you already have on a Mac** — your own Google Cloud
@@ -222,6 +240,7 @@ against in-memory fixtures.
 | Run the demo | `OURCAL_DEMO=1 python3 ourcal.py` |
 | Run the tests | `python3 -m unittest discover tests -q` |
 | Build the Mac app + `.dmg` | `./packaging/build-app.sh` |
+| Build the Android `.apk` | `./packaging/build-android.sh` |
 
 The whole application is one file, `ourcal.py`, with the interface embedded as
 an HTML/CSS/JS string. That is deliberate — see [Contributing](#contributing).
@@ -231,7 +250,21 @@ matching tag (`git tag v1.0.1 && git push origin v1.0.1`) or running the release
 workflow manually. The workflow refuses to build when the tag and `VERSION`
 disagree.
 
-Android has no release job yet — `.github/workflows/release.yml` builds the `.dmg` only. Build it from source instead: `./packaging/build-android.sh` produces `dist/OurCal-<version>-android.apk`, which you sideload yourself (Play Protect will warn on install; tapping "Install anyway" proceeds). That APK is currently debug-signed — the Android SDK's shared debug keystore, with `debuggable=true` — which is fine for a personal build but a known gap before this could be handed to anyone else; see ["Follow-on: the debug APK undercuts Part 0"](docs/superpowers/specs/2026-08-07-android-setup-import-design.md#follow-on-the-debug-apk-undercuts-part-0) for what that gap actually is. [NOTES-android.md](NOTES-android.md) covers the earlier OAuth-on-Android spike, Play Protect, build cost and the shape of the migration — not the signing gap.
+`.github/workflows/release.yml` builds and publishes both the `.dmg` and the
+`.apk` — see [Install](#install) for the download-and-sideload steps most
+people want. A **tagged** release is gated: the workflow refuses to publish
+unless the APK is release-signed with the project's own keystore and carries
+a bundled OAuth client, so anyone downloading it from Releases gets a build
+meant to be handed around, not one signed with the Android SDK's shared
+debug key. A manual `workflow_dispatch` run (no tag) skips that gate, so its
+APK may come back debug-signed or paste-only — useful for exercising the
+pipeline, not for distributing. Building from source with
+`./packaging/build-android.sh` still produces a debug-signed APK unless you
+also set the `ANDROID_KEYSTORE_*` variables it reads for release signing;
+either way you sideload the result yourself, and Play Protect will warn on
+install ("App blocked to protect your device" — tap **Install anyway**).
+[NOTES-android.md](NOTES-android.md) covers the earlier OAuth-on-Android
+spike, Play Protect, build cost and the shape of the migration.
 
 ## Privacy
 
