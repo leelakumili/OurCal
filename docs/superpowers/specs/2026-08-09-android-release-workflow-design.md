@@ -170,8 +170,8 @@ has actually experienced:
    files into a nested archive, so grepping the extracted APK gives a false
    negative — that happened during the previous cycle and briefly read as "the
    client was not bundled".
-2. **The APK contains no `token_*.json`** and none of the author's addresses.
-   Cheap, and it is the property a reader of the README is being asked to trust.
+2. **The APK contains no `token_*.json`.** Cheap, and it is the property a
+   reader of the README is being asked to trust.
 3. **`android:debuggable` is false** on a release build. A debuggable APK lets
    `adb shell run-as` read the app's private files, which is where users' refresh
    tokens live.
@@ -226,7 +226,9 @@ The workflow itself cannot be unit-tested, so verification is by execution:
 
 - `workflow_dispatch` without a tag, with no secrets configured: both jobs build,
   the APK is debug-signed, verification assertions 1 and 2 pass, 3 and 4 skip,
-  and a draft release carries both artifacts.
+  and a **prerelease** carries both artifacts (nothing sets `draft:` — a
+  non-tag run publishes immediately, just marked prerelease rather than
+  Latest).
 - The same with secrets configured: the APK is release-signed and all four
   assertions pass.
 - A tag build with the keystore secret removed: the release job fails and nothing
