@@ -191,6 +191,17 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/ourcal.jks"
 
+      - name: Remove the OAuth client
+        # credentials.json is written to the working tree by design — it is
+        # the same path a local build already reads it from, and its
+        # contents ship inside the public APK regardless. This step is
+        # defence in depth rather than a fix (the runner is destroyed after
+        # the job anyway): it removes the asymmetry with the keystore
+        # cleanup above and keeps the file from surviving into anything a
+        # later step might capture.
+        if: always()
+        run: rm -f credentials.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: apk

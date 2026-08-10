@@ -58,7 +58,7 @@ macos (macos-14)              android (ubuntu-latest)
   upload-artifact               write keystore from secret
        │                        build + sign the APK
        │                        verify the APK (Part 4)
-       │                        remove the keystore  [always()]
+       │                        remove keystore + credentials.json  [always()]
        │                        upload-artifact
        └───────────┬────────────┘
                    ▼
@@ -119,7 +119,8 @@ because a warning buried in a workflow comment is a warning nobody reads.
 The workflow decodes the keystore to a path **outside the working tree**
 (`$RUNNER_TEMP`), passes the four values to Briefcase's Android packaging, and
 removes the file in an `if: always()` step so a failed build does not leave it on
-the runner.
+the runner. This is the one secret in this design for which that matters: see
+Part 3 for why the OAuth client is handled differently, deliberately.
 
 `packaging/build-android.sh` gains an optional signing path: when
 `ANDROID_KEYSTORE_PATH` and its companions are set in the environment it produces
@@ -132,15 +133,30 @@ a release-signed APK; unset, it behaves exactly as today and produces
 
 `ANDROID_OAUTH_CLIENT` holds the contents of `credentials.json`. The Android job
 writes it to the repository root before building; `build-android.sh:33` already
-copies it into the app's resources from there.
+copies it into the app's resources from there — the same path a local build
+already reads it from, and the only path `build-android.sh` knows to look at.
 
 Without it the APK is paste-only, and the accounts editor and on-device sign-in
 built in the previous cycle are unreachable for anyone who downloads it — the
 app would install, open, and offer a setup screen asking for a bundle the user
 cannot produce. **On a tag that is a build failure, not a warning.**
 
-The client is written to a path the build already ignores, and the workflow does
-not echo it. `credentials.json` stays git-ignored.
+**This is written into the working tree, unlike the keystore, and that is
+deliberate rather than an inconsistency.** The two secrets have very different
+exposure. The keystore is genuinely secret, and leaking it is unrecoverable —
+anyone holding it can sign an APK Android will install as an update over every
+existing user's copy, inheriting their credentials and refresh tokens. The
+OAuth client is the opposite: its entire purpose is to be embedded inside a
+publicly downloadable APK. Routing it through a path outside the tree would add
+a code path and an interface override to `build-android.sh` to protect
+something that ships to the world by design, so the working tree is not a
+meaningful additional exposure for it.
+
+What does matter for it, and what the workflow does: `credentials.json` stays
+git-ignored, the workflow never echoes its contents, it is not part of the
+uploaded `apk` artifact, and it is removed from the runner in an `if: always()`
+step — alongside the keystore removal, so the two read as a pair — once the job
+is done with it.
 
 ---
 
@@ -200,6 +216,7 @@ The existing body keeps its macOS half unchanged and gains an Android half:
 | macOS build fails | No release created |
 | Version mismatch in either job | That job fails, as today |
 | Keystore left on the runner | Removed in an `always()` step |
+| `credentials.json` left on the runner | Removed in an `always()` step — defence in depth; the runner is destroyed anyway |
 
 ---
 
