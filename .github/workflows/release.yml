@@ -331,6 +331,13 @@ jobs:
 
             ## Android
 
+            Check the release badge first: if this isn't labelled **Latest**,
+            it's a manual test build and may be debug-signed or paste-only
+            rather than what the steps below assume. If **Set up this
+            device** asks for `credentials.json` instead of offering **Sign
+            in**, paste a bundle from `./ourcal.py --export` instead — see
+            SETUP_GUIDE.md's Troubleshooting section.
+
             1. Download the `.apk` below and open it on your phone.
             2. Play Protect will say **"App blocked to protect your device"** — tap
                **Install anyway**. It says that because the app is sideloaded rather
