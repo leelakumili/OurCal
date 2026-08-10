@@ -85,8 +85,14 @@ if [ -n "${ANDROID_KEYSTORE_PATH:-}" ] && [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" 
   # place, so there is exactly one release APK to find afterwards.
   rm -rf "$ANDROID/dist"   # clean slate so the find below can't pick up a stale file
   "$VENV/bin/briefcase" package android -p apk --no-input
+  # Briefcase's tool cache lives under ~/Library/Caches on macOS and under
+  # ~/.cache/briefcase on Linux (verify-apk.sh already searches both; this
+  # is the same fix applied where the APK actually gets signed). Searching
+  # both unconditionally is safe — find only warns on the path that is
+  # absent on the current OS, and that warning is discarded.
   APKSIGNER=$(find ~/Library/Caches/org.beeware.briefcase/tools/android_sdk/build-tools \
-                -name apksigner | sort -V | tail -1)
+                   ~/.cache/briefcase/tools/android_sdk/build-tools \
+                -name apksigner 2>/dev/null | sort -V | tail -1)
   [ -n "$APKSIGNER" ] || { echo "apksigner not found under the Android SDK build-tools"; exit 1; }
   UNSIGNED=$(find "$ANDROID/dist" -name "*.apk" | head -1)
   [ -n "$UNSIGNED" ] || { echo "no unsigned release APK produced"; exit 1; }

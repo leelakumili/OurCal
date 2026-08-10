@@ -19,6 +19,8 @@ jobs:
   macos:
     # macos-14 is Apple Silicon. Intel Macs would need a second job on macos-13.
     runs-on: macos-14
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -85,11 +87,152 @@ jobs:
         env:
           OURCAL_DEMO: "1"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  android:
+    # ubuntu, not macos-14: the Android build needs a JDK (preinstalled here)
+    # and bills about a tenth of a macOS runner for a job that takes minutes
+    # even with warm caches.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check the version is consistent
+        run: |
+          FILE=$(python3 -c "import re;print(re.search(r'^VERSION = \"(.*)\"', open('ourcal.py').read(), re.M).group(1))")
+          PYPROJ=$(python3 -c "import re;print(re.search(r'^version = \"(.*)\"', open('packaging/android/pyproject.toml').read(), re.M).group(1))")
+          [ "$FILE" = "$PYPROJ" ] || { echo "::error::ourcal.py $FILE != pyproject $PYPROJ"; exit 1; }
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            [ "$TAG" = "$FILE" ] || { echo "::error::tag v$TAG != VERSION $FILE"; exit 1; }
+          fi
+
+      - name: Run the test suite
+        # Never ship a build whose tests were not run on the machine that built it.
+        run: python3 -m unittest discover -s tests -q
+
+      # NOTES-android.md:74-77 — the first build pulls a JDK, the Android SDK
+      # and Gradle, several GB and several minutes. Without these caches every
+      # release pays that again.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('packaging/android/pyproject.toml') }}
+          restore-keys: gradle-
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/briefcase
+          key: briefcase-${{ hashFiles('packaging/build-android.sh') }}
+          restore-keys: briefcase-
+
+      - name: Write the OAuth client
+        # Without it the APK is paste-only and the on-device sign-in is
+        # unreachable for anyone who downloads it. Absent here it still
+        # builds; the release job is what refuses to publish one on a tag.
+        # Recorded in dist/.apk-oauth-client (bundled/missing) alongside
+        # dist/.apk-signing so the release job's gate can read the answer
+        # instead of re-deriving it from a secret it does not have.
+        env:
+          CLIENT: ${{ secrets.ANDROID_OAUTH_CLIENT }}
+        run: |
+          mkdir -p dist
+          if [ -n "$CLIENT" ]; then
+            printf '%s' "$CLIENT" > credentials.json
+            echo bundled > dist/.apk-oauth-client
+            echo "oauth client written"
+          else
+            echo missing > dist/.apk-oauth-client
+            echo "no ANDROID_OAUTH_CLIENT — this APK will be paste-only"
+          fi
+
+      - name: Write the release keystore
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/ourcal.jks"
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/ourcal.jks" >> "$GITHUB_ENV"
+            echo "keystore written"
+          else
+            echo "no ANDROID_KEYSTORE_B64 — this APK will be debug-signed"
+          fi
+
+      - name: Build the APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./packaging/build-android.sh
+
+      - name: Verify the APK
+        # dist/OurCal-*-android.apk as a bare argument would word-split into
+        # multiple arguments if it ever matched more than one file, and
+        # verify-apk.sh only reads $1 — a silent partial check. nullglob plus
+        # an explicit count makes "exactly one APK" a checked fact rather
+        # than an assumption.
+        run: |
+          shopt -s nullglob
+          apks=(dist/OurCal-*-android.apk)
+          [ "${#apks[@]}" -eq 1 ] || { echo "::error::expected exactly one built APK, found ${#apks[@]}: ${apks[*]}"; exit 1; }
+          ./packaging/verify-apk.sh "${apks[0]}"
+
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ourcal.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: |
+            dist/*.apk
+            dist/.apk-signing
+            dist/.apk-oauth-client
+          if-no-files-found: error
+
+  release:
+    needs: [macos, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dmg, path: dist }
+      - uses: actions/download-artifact@v4
+        with: { name: apk, path: dist }
+
+      - name: Refuse to publish an unsigned or paste-only APK on a tag
+        # The debug fallback exists so forks and untagged builds work. It must
+        # never reach strangers: a debug APK is signed with the key every
+        # Android SDK ships, so anyone could build one with this package name
+        # and have Android install it as an update over a user's copy,
+        # inheriting their credentials and refresh tokens. A release-signed
+        # APK built without the OAuth client is a second way to publish
+        # something nobody can use: installable and openable, but paste-only,
+        # and nobody downloading a release build has a bundle to paste in.
+        if: github.ref_type == 'tag'
+        run: |
+          [ "$(cat dist/.apk-signing)" = release ] || {
+            echo "::error::tagged release but the APK is debug-signed — set the ANDROID_KEYSTORE_* secrets"; exit 1; }
+          [ "$(cat dist/.apk-oauth-client)" = bundled ] || {
+            echo "::error::tagged release but no OAuth client was bundled — set the ANDROID_OAUTH_CLIENT secret"; exit 1; }
+          echo "release-signed APK with a bundled OAuth client confirmed"
+
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.version.outputs.version) }}
-          name: OurCal ${{ steps.version.outputs.version }}
-          files: dist/*.dmg
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.macos.outputs.version) }}
+          name: OurCal ${{ needs.macos.outputs.version }}
+          files: |
+            dist/*.dmg
+            dist/*.apk
           generate_release_notes: true
           body: |
             ## Install
