@@ -241,6 +241,15 @@ jobs:
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.macos.outputs.version) }}
           name: OurCal ${{ needs.macos.outputs.version }}
+          # The gate above only runs on a tag — a workflow_dispatch build can
+          # still land here debug-signed or paste-only. Without this, that
+          # build would publish to the same public Releases page and, being
+          # the newest, present itself to a casual visitor as the one to
+          # grab. Marking every non-tag run a prerelease keeps "Latest" (and
+          # the plain download-and-sideload instructions in README.md and
+          # SETUP_GUIDE.md, which assume a tagged build) pointed at a release
+          # that is guaranteed release-signed with a bundled OAuth client.
+          prerelease: ${{ github.ref_type != 'tag' }}
           files: |
             dist/*.dmg
             dist/*.apk

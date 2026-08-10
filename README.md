@@ -75,11 +75,13 @@ Play Protect will say **"App blocked to protect your device"**; tap
 **Install anyway**. That's because the app isn't from the Store, not
 because anything is wrong with it.
 
-The APK bundles its own OAuth client, so you can add an account and sign in
-right on the phone — no computer, no Google Cloud project needed. Full
-walkthrough, including the "Google hasn't verified this app" screen you'll
-also hit: [On Android: sign in on the
-device](SETUP_GUIDE.md#on-android-sign-in-on-the-device).
+The `.apk` on the **latest** release bundles its own OAuth client, so you can
+add an account and sign in right on the phone — no computer, no Google Cloud
+project needed. Full walkthrough, including the "Google hasn't verified this
+app" screen you'll also hit: [On Android: sign in on the
+device](SETUP_GUIDE.md#on-android-sign-in-on-the-device). (A pre-release —
+anything not labelled **Latest** — is a manual test build and may not have
+one; see [Development](#development).)
 
 To build it yourself instead: `./packaging/build-android.sh`.
 
@@ -102,12 +104,12 @@ download a Desktop OAuth client as `credentials.json`.
 
 Full walkthrough: **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.
 
-Android is the exception: the `.apk` downloaded from
-[Releases](../../releases) already has an OAuth client bundled in, and so
-does a self-built one — `packaging/build-android.sh` ships one inside the
-APK when it finds `credentials.json` in the working tree — so that install
-can add an account and sign in with no computer at all once it's on the
-phone — see [On Android: sign in on the
+Android is the exception: the `.apk` on the **latest** release already has
+an OAuth client bundled in, and so does a self-built one —
+`packaging/build-android.sh` ships one inside the APK when it finds
+`credentials.json` in the working tree — so that install can add an account
+and sign in with no computer at all once it's on the phone — see [On Android:
+sign in on the
 device](SETUP_GUIDE.md#on-android-sign-in-on-the-device). That doesn't change
 what you do here. `credentials.json` is an app identity, not an account key —
 it holds a client id and secret and no refresh token, and Google issues a
@@ -129,10 +131,10 @@ source.
 Two ways to get going on the phone.
 
 **Using the bundled client** — the default whether you downloaded the `.apk`
-from [Releases](../../releases) or built it yourself with
-`credentials.json` present (`packaging/build-android.sh` bundles the client
-in either way) — add an account and sign in right on the phone, no computer
-needed. Full walkthrough: [On Android: sign in on the
+from the **latest** release or built it yourself with `credentials.json`
+present (`packaging/build-android.sh` bundles the client in either way) —
+add an account and sign in right on the phone, no computer needed. Full
+walkthrough: [On Android: sign in on the
 device](SETUP_GUIDE.md#on-android-sign-in-on-the-device).
 
 **To bring across a setup you already have on a Mac** — your own Google Cloud
@@ -254,11 +256,13 @@ disagree.
 `.apk` — see [Install](#install) for the download-and-sideload steps most
 people want. A **tagged** release is gated: the workflow refuses to publish
 unless the APK is release-signed with the project's own keystore and carries
-a bundled OAuth client, so anyone downloading it from Releases gets a build
-meant to be handed around, not one signed with the Android SDK's shared
-debug key. A manual `workflow_dispatch` run (no tag) skips that gate, so its
-APK may come back debug-signed or paste-only — useful for exercising the
-pipeline, not for distributing. Building from source with
+a bundled OAuth client, so anyone downloading the **latest** release gets a
+build meant to be handed around, not one signed with the Android SDK's
+shared debug key. A manual `workflow_dispatch` run (no tag) skips that gate,
+so its APK may come back debug-signed or paste-only; the workflow publishes
+it as a **pre-release** rather than Latest, so it can't present itself as
+the release to grab — useful for exercising the pipeline, not for
+distributing. Building from source with
 `./packaging/build-android.sh` still produces a debug-signed APK unless you
 also set the `ANDROID_KEYSTORE_*` variables it reads for release signing;
 either way you sideload the result yourself, and Play Protect will warn on
