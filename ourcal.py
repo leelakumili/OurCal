@@ -1879,13 +1879,27 @@ PAGE = r"""<!doctype html>
   .delsum .dw{font-size:12px;color:var(--muted);margin-top:2px}
   .scoperow{display:flex;align-items:center;gap:7px;padding:5px 0;font-size:13px}
   .scoperow .sub{color:var(--muted);font-size:11px}
-  @media (max-width:560px){ .rowacts{opacity:1} }
+  /* A touch screen has no hover, so the row actions have to be permanently
+     visible. But .rowacts never shrinks, and on the same flex line as .body
+     three buttons plus the 92px time column leave the title a few pixels of
+     a ~360px viewport — the title then wraps one character per line. Give
+     the actions their own row underneath instead of a share of that line. */
+  @media (max-width:560px){
+    .ev{flex-wrap:wrap}
+    .rowacts{opacity:1;width:100%;margin-left:0;margin-top:8px;justify-content:flex-end}
+  }
   #rangeSel{font-size:13px;padding:6px 8px;border-radius:9px;border:1px solid var(--border);
     background:var(--card);color:var(--text);cursor:pointer}
   .toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:60}
   .toast{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--live);border-radius:10px;padding:10px 14px;box-shadow:var(--shadow);font-size:13px;max-width:320px}
   .toast.err{border-left-color:var(--danger)}
-  @media (max-width:640px){ .tiles{grid-template-columns:repeat(2,1fr)} }
+  /* Two columns on a phone leaves each tile ~130px of content width, and the
+     longest value a tile can hold ("in 106h 12m") does not fit at 23px — it
+     wraps onto a second line and crowds the label under it. */
+  @media (max-width:640px){
+    .tiles{grid-template-columns:repeat(2,1fr)}
+    .tile .n{font-size:19px}
+  }
 </style>
 </head>
 <body>
