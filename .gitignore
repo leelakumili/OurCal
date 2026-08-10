@@ -1,6 +1,12 @@
 credentials.json
 token_*.json
 accounts.json
+# Signing keystores. Committing one is the single unrecoverable mistake in
+# this repo: anyone holding it can sign an APK that Android installs as an
+# update over every user's copy, inheriting their credentials and tokens.
+# Keep the real keystore outside the repo entirely — this is only a backstop.
+*.jks
+*.keystore
 .ourcal-venv/
 __pycache__/
 .DS_Store
