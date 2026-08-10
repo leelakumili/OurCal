@@ -71,7 +71,10 @@ if [ "$SIGNING" = release ]; then
       note "OK   not debuggable"
     fi
   else
-    note "SKIP debuggable check (aapt2 not found on PATH or under the Briefcase Android SDK)"
+    # A release build with no way to check this is not a pass — it is an
+    # unverified release. Skipping quietly here would let "verification
+    # passed" mean "the two checks that matter never ran."
+    bad "cannot verify debuggable flag — aapt2 not found, and a release APK must not go out unverified"
   fi
 
   APKSIGNER=$(ls ~/Library/Caches/org.beeware.briefcase/tools/android_sdk/build-tools/*/apksigner \
@@ -84,10 +87,10 @@ if [ "$SIGNING" = release ]; then
       note "OK   not signed with the debug key"
     fi
   else
-    note "SKIP signing-key check (apksigner not found)"
+    bad "cannot verify signing key — apksigner not found, and a release APK must not go out unverified"
   fi
 else
-  note "SKIP release-only checks (debug build)"
+  note "SKIP release-only checks ($SIGNING build)"
 fi
 
 [ "$fail" -eq 0 ] || { echo "verification FAILED"; exit 1; }
