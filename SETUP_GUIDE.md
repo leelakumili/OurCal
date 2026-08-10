@@ -157,10 +157,13 @@ immediately via **Refresh**).
 
 Everything above assumes a Mac or a source checkout, and ends with you
 pasting a `credentials.json` you downloaded yourself. Skip all of that if
-you're running an APK built with one bundled in — `./packaging/build-android.sh`
-prints **"bundling the OAuth client"** when it copies one in from the working
-tree. A fresh install of that APK can add an account and sign in to Google
-with no computer at all:
+you're running an APK with one bundled in — the `.apk` on the **latest**
+[release](../../releases) has one built in, and so does a self-built one
+where `./packaging/build-android.sh` printed **"bundling the OAuth client"**
+when it copied one in from the working tree. (A pre-release — a manual test
+build — may not; see `README.md`'s [Development](README.md#development)
+section.) A fresh install of a bundled-client APK can add an account and
+sign in to Google with no computer at all:
 
 1. Open OurCal and tap **Set up this device** (the footer link) — or tap
    **Sign in** on any account's banner, which lands on the same page.

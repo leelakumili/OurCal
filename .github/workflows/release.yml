@@ -6,19 +6,17 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release (e.g. 1.0.1). Defaults to VERSION in ourcal.py."
-        required: false
+  workflow_dispatch: {}
 
 permissions:
-  contents: write        # needed to create the release and upload the .dmg
+  contents: write        # needed to create the release and upload the .dmg and .apk
 
 jobs:
   macos:
     # macos-14 is Apple Silicon. Intel Macs would need a second job on macos-13.
     runs-on: macos-14
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -85,11 +83,223 @@ jobs:
         env:
           OURCAL_DEMO: "1"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  android:
+    # ubuntu, not macos-14: the Android build needs a JDK (preinstalled here)
+    # and bills about a tenth of a macOS runner for a job that takes minutes
+    # even with warm caches.
+    runs-on: ubuntu-latest
+    env:
+      # ubuntu-latest preinstalls an SDK at /usr/local/lib/android/sdk and
+      # points both of these at it. Briefcase checks ANDROID_HOME first and
+      # may adopt that SDK instead of downloading (and caching) its own —
+      # putting apksigner/aapt2 somewhere neither script searches, and
+      # making the outcome a coin flip per run. Pinning both empty forces
+      # Briefcase onto its own cached SDK every time, which is also what
+      # makes the ~/.cache/briefcase cache below actually save anything.
+      ANDROID_HOME: ""
+      ANDROID_SDK_ROOT: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check the version is consistent
+        run: |
+          FILE=$(python3 -c "import re;print(re.search(r'^VERSION = \"(.*)\"', open('ourcal.py').read(), re.M).group(1))")
+          PYPROJ=$(python3 -c "import re;print(re.search(r'^version = \"(.*)\"', open('packaging/android/pyproject.toml').read(), re.M).group(1))")
+          [ "$FILE" = "$PYPROJ" ] || { echo "::error::ourcal.py $FILE != pyproject $PYPROJ"; exit 1; }
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            [ "$TAG" = "$FILE" ] || { echo "::error::tag v$TAG != VERSION $FILE"; exit 1; }
+          fi
+
+      - name: Run the test suite
+        # Never ship a build whose tests were not run on the machine that built it.
+        run: python3 -m unittest discover -s tests -q
+
+      # NOTES-android.md:74-77 — the first build pulls a JDK, the Android SDK
+      # and Gradle, several GB and several minutes. Without these caches every
+      # release pays that again.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('packaging/android/pyproject.toml') }}
+          restore-keys: gradle-
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/briefcase
+          key: briefcase-${{ hashFiles('packaging/build-android.sh') }}
+          restore-keys: briefcase-
+
+      - name: Write the OAuth client
+        # Without it the APK is paste-only and the on-device sign-in is
+        # unreachable for anyone who downloads it. Absent here it still
+        # builds; the release job is what refuses to publish one on a tag.
+        # Recorded in dist/apk-oauth-client.txt (bundled/missing) alongside
+        # dist/apk-signing.txt so the release job's gate can read the answer
+        # instead of re-deriving it from a secret it does not have. Not
+        # dotfile-prefixed: actions/upload-artifact@v4 (>=4.4.0) excludes
+        # hidden files by default, which silently dropped the old
+        # dist/.apk-signing / dist/.apk-oauth-client markers from the
+        # uploaded artifact entirely — the release job's gate below then
+        # read `cat`'s empty-string fallback and refused every tagged
+        # release, including correctly signed ones.
+        env:
+          CLIENT: ${{ secrets.ANDROID_OAUTH_CLIENT }}
+        run: |
+          mkdir -p dist
+          if [ -n "$CLIENT" ]; then
+            printf '%s' "$CLIENT" > credentials.json
+            echo bundled > dist/apk-oauth-client.txt
+            echo "oauth client written"
+          else
+            echo missing > dist/apk-oauth-client.txt
+            echo "no ANDROID_OAUTH_CLIENT — this APK will be paste-only"
+          fi
+
+      - name: Write the release keystore
+        # See README.md's Development section ("Android release signing")
+        # for how to generate ourcal.jks and where these five secrets come
+        # from — losing ourcal.jks is unrecoverable, so read that before
+        # regenerating one.
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/ourcal.jks"
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/ourcal.jks" >> "$GITHUB_ENV"
+            echo "keystore written"
+          else
+            echo "no ANDROID_KEYSTORE_B64 — this APK will be debug-signed"
+          fi
+
+      - name: Build the APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./packaging/build-android.sh
+
+      - name: Verify the APK
+        # dist/OurCal-*-android.apk as a bare argument would word-split into
+        # multiple arguments if it ever matched more than one file, and
+        # verify-apk.sh only reads $1 — a silent partial check. nullglob plus
+        # an explicit count makes "exactly one APK" a checked fact rather
+        # than an assumption.
+        run: |
+          shopt -s nullglob
+          apks=(dist/OurCal-*-android.apk)
+          [ "${#apks[@]}" -eq 1 ] || { echo "::error::expected exactly one built APK, found ${#apks[@]}: ${apks[*]}"; exit 1; }
+          ./packaging/verify-apk.sh "${apks[0]}"
+
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ourcal.jks"
+
+      - name: Remove the OAuth client
+        # credentials.json is written to the working tree by design — it is
+        # the same path a local build already reads it from, and its
+        # contents ship inside the public APK regardless. This step is
+        # defence in depth rather than a fix (the runner is destroyed after
+        # the job anyway): it removes the asymmetry with the keystore
+        # cleanup above and keeps the file from surviving into anything a
+        # later step might capture.
+        if: always()
+        run: rm -f credentials.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: |
+            dist/*.apk
+            dist/apk-signing.txt
+            dist/apk-oauth-client.txt
+          if-no-files-found: error
+
+  release:
+    needs: [macos, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dmg, path: dist }
+      - uses: actions/download-artifact@v4
+        with: { name: apk, path: dist }
+
+      - name: Refuse to publish an unsigned or paste-only APK on a tag
+        # The debug fallback exists so forks and untagged builds work. It must
+        # never reach strangers: a debug APK is signed with the key every
+        # Android SDK ships, so anyone could build one with this package name
+        # and have Android install it as an update over a user's copy,
+        # inheriting their credentials and refresh tokens. A release-signed
+        # APK built without the OAuth client is a second way to publish
+        # something nobody can use: installable and openable, but paste-only,
+        # and nobody downloading a release build has a bundle to paste in.
+        if: github.ref_type == 'tag'
+        env:
+          # Booleans only — never the secret values themselves — so this can
+          # name exactly which secrets are missing without putting one in a
+          # log. Fixes a real case: with 3 of 4 signing secrets set, the APK
+          # comes back debug-signed and this used to say "set the
+          # ANDROID_KEYSTORE_* secrets", pointing at all four including the
+          # three that were already set.
+          HAVE_KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 != '' }}
+          HAVE_KS_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD != '' }}
+          HAVE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS != '' }}
+          HAVE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD != '' }}
+        run: |
+          if [ "$(cat dist/apk-signing.txt)" != release ]; then
+            missing=""
+            [ "$HAVE_KS_B64" = true ]       || missing="$missing ANDROID_KEYSTORE_B64"
+            [ "$HAVE_KS_PASSWORD" = true ]  || missing="$missing ANDROID_KEYSTORE_PASSWORD"
+            [ "$HAVE_KEY_ALIAS" = true ]    || missing="$missing ANDROID_KEY_ALIAS"
+            [ "$HAVE_KEY_PASSWORD" = true ] || missing="$missing ANDROID_KEY_PASSWORD"
+            [ -n "$missing" ] || missing=" (all four are set — the android job's build step failed to sign despite that; check its log)"
+            echo "::error::tagged release but the APK is debug-signed — missing secrets:$missing"
+            exit 1
+          fi
+          [ "$(cat dist/apk-oauth-client.txt)" = bundled ] || {
+            echo "::error::tagged release but no OAuth client was bundled — set the ANDROID_OAUTH_CLIENT secret"; exit 1; }
+          echo "release-signed APK with a bundled OAuth client confirmed"
+
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.version.outputs.version) }}
-          name: OurCal ${{ steps.version.outputs.version }}
-          files: dist/*.dmg
+          # A workflow_dispatch run gets its own tag rather than reusing
+          # "vX.Y.Z" — softprops/action-gh-release updates an existing
+          # release and replaces same-named assets, and the gate above only
+          # guards tags. Without this, pressing the button on main after
+          # v1.0.1 had already shipped would silently replace that published
+          # release's signed .apk with whatever a debug/paste-only dispatch
+          # build produced — the release page would look untouched (same
+          # tag, same title) while the asset underneath it changed. Giving
+          # every dispatch run "vX.Y.Z-dispatch-<run number>" instead makes
+          # each one its own release rather than a body-double for a real
+          # one; run_number keeps repeat dispatches at the same version from
+          # colliding with each other too.
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}-dispatch-{1}', needs.macos.outputs.version, github.run_number) }}
+          name: ${{ github.ref_type == 'tag' && format('OurCal {0}', needs.macos.outputs.version) || format('OurCal {0} (dispatch #{1})', needs.macos.outputs.version, github.run_number) }}
+          # The gate above only runs on a tag — a workflow_dispatch build can
+          # still land here debug-signed or paste-only. Without this, that
+          # build would publish to the same public Releases page and, being
+          # the newest, present itself to a casual visitor as the one to
+          # grab. Marking every non-tag run a prerelease keeps "Latest" (and
+          # the plain download-and-sideload instructions in README.md and
+          # SETUP_GUIDE.md, which assume a tagged build) pointed at a release
+          # that is guaranteed release-signed with a bundled OAuth client.
+          prerelease: ${{ github.ref_type != 'tag' }}
+          files: |
+            dist/*.dmg
+            dist/*.apk
           generate_release_notes: true
           body: |
             ## Install
@@ -118,3 +328,25 @@ jobs:
             ```
 
             Apple Silicon only.
+
+            ## Android
+
+            Check the release badge first: if this isn't labelled **Latest**,
+            it's a manual test build and may be debug-signed or paste-only
+            rather than what the steps below assume. If **Set up this
+            device** asks for `credentials.json` instead of offering **Sign
+            in**, paste a bundle from `./ourcal.py --export` instead — see
+            SETUP_GUIDE.md's Troubleshooting section.
+
+            1. Download the `.apk` below and open it on your phone.
+            2. Play Protect will say **"App blocked to protect your device"** — tap
+               **Install anyway**. It says that because the app is sideloaded rather
+               than from the Play Store, not because anything is wrong with it.
+            3. Open OurCal → **Set up this device** → add an account (a name and your
+               Gmail address) → **Sign in**.
+            4. Google shows **"Google hasn't verified this app"** — tap **Advanced**,
+               then **Go to OurCal**. The consent screen is published but unverified.
+            5. **Come back to OurCal after granting access.** Android cuts a
+               backgrounded app's network, and the sign-in waits for you to return.
+
+            Your calendar data and tokens stay on your phone.
