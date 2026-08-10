@@ -259,11 +259,16 @@ The checks are worthless if they cannot fail. Force each:
 
 ```bash
 # a bogus signing marker turns on the release-only checks against a debug APK
-echo release > dist/.apk-signing
+echo release > dist/apk-signing.txt
 ./packaging/verify-apk.sh dist/OurCal-1.0.1-android.apk; echo "exit: $?"
 ```
 
-Expected: **fails**, naming the debug key. Restore `dist/.apk-signing` to `debug` afterwards and confirm it passes again. Record both outputs in your report.
+Expected: **fails**, naming the debug key. Restore `dist/apk-signing.txt` to `debug` afterwards and confirm it passes again. Record both outputs in your report.
+
+(Marker renamed from `dist/.apk-signing` to `dist/apk-signing.txt` in a later
+fix wave — `actions/upload-artifact@v4` excludes dotfiles by default, which
+silently dropped the original name from the CI artifact. Written here with
+the current name so this step still exercises what it claims to.)
 
 - [ ] **Step 4: Commit**
 
@@ -543,7 +548,7 @@ this branch; false now."
 - [ ] `python3 -m unittest discover tests -q` — 348 pass, 1 skipped (unchanged; no Python was touched)
 - [ ] `git status --short` shows no `credentials.json`, no `*.jks`, and no modified `accounts.json` or `token_*.json`
 - [ ] `./packaging/build-android.sh` with no signing environment still produces a debug APK, exactly as before
-- [ ] `./packaging/verify-apk.sh` passes on that APK, and **fails** when `dist/.apk-signing` is forced to `release`
+- [ ] `./packaging/verify-apk.sh` passes on that APK, and **fails** when `dist/apk-signing.txt` is forced to `release`
 - [ ] The workflow YAML parses and declares three jobs with the right dependencies
 
 **Cannot be verified without pushing:** that the workflow actually runs. The

@@ -180,10 +180,21 @@ has actually experienced:
 
 Assertions 1 and 2 always run. Assertions 3 and 4 are conditioned on **whether
 the build was release-signed**, not on whether it is a tag: a debug fallback
-legitimately fails both, and a release-signed build must pass both even when it
-is not a tag. The build step records which path it took, and the verification
-step reads that rather than re-deriving it — so the two can never disagree about
-what was built.
+legitimately *skips* both — they are not evaluated at all, rather than
+evaluated and expected to fail — and a release-signed build must pass both
+even when it is not a tag. A missing or unreadable signing marker is treated
+the same as release, not as debug, for this same conditioning: refusing to
+verify is safer than silently skipping (and therefore passing) a check nobody
+actually earned. The build step records which path it took, and the
+verification step reads that rather than re-deriving it — so the two can
+never disagree about what was built.
+
+The script also tracks how many of the four assertions actually produced a
+genuine verdict, separately from how many failed — a missing tool, or an
+artifact a tool ran against but could not parse, does not count as having
+run one. "Verification passed" always states that count, and a
+release-conditioned build that ran fewer than four assertions is a failure
+regardless of which individual assertion did or didn't fire on its own.
 
 ---
 
