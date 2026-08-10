@@ -75,13 +75,30 @@ ran=$((ran+1))
 #    Chaquopy's nested app.imy, not the extracted tree. Searching only the
 #    extracted tree would reproduce the exact false negative check 1 exists
 #    to avoid, so this greps $LISTING (already read for check 1) as well.
+#
+# The family of bugs this file used to have, in one sentence: check 1 above
+# greps for a *good* signal (the client's path), so an empty capture reads
+# as "not found" and fails closed on a release build. This check, and 3 and
+# 4 below, grep for a *bad* signal (a token filename, "application-
+# debuggable", the debug CN) — an empty capture there used to read as
+# "clean," which fails OPEN: a tool that ran and produced nothing (a parse
+# error, a truncated APK, app.imy missing or renamed) looked identical to a
+# tool that ran and genuinely found nothing wrong, and got counted as a
+# check that ran. Each bad-signal check below now requires positive
+# evidence of a successful read before it will conclude "fine."
 TOKENFILES=$(find "$WORK" -name "token_*.json" 2>/dev/null || true)
-if [ -n "$TOKENFILES" ] || grep -q "token_.*\.json" <<<"$LISTING"; then
+if [ -n "$TOKENFILES" ]; then
   bad "token files are bundled in the APK"
+  ran=$((ran+1))
+elif [ -z "$LISTING" ]; then
+  bad "cannot read assets/chaquopy/app.imy — the token check could not inspect the nested archive"
+elif grep -q "token_.*\.json" <<<"$LISTING"; then
+  bad "token files are bundled in the APK"
+  ran=$((ran+1))
 else
   note "OK   no token files"
+  ran=$((ran+1))
 fi
-ran=$((ran+1))
 
 # 3 and 4 only apply to a release build. A debug fallback legitimately
 #   skips both, and gating them on "is this a tag" would skip them for a
@@ -106,12 +123,20 @@ if [ "$SIGNING" != debug ]; then
   fi
   if [ -n "$AAPT2" ]; then
     BADGING=$("$AAPT2" dump badging "$APK" 2>/dev/null || true)
-    if grep -q "application-debuggable" <<<"$BADGING"; then
+    # `2>/dev/null || true` hides aapt2 exiting nonzero on a resource it
+    # can't parse or a truncated APK — exactly the case `bad "cannot verify
+    # signing key ..."` above the `else` exists for when the tool is
+    # missing entirely. A tool that ran and produced nothing must not read
+    # the same as a tool that ran and found the app not debuggable.
+    if [ -z "$BADGING" ]; then
+      bad "cannot verify debuggable flag — aapt2 produced no output"
+    elif grep -q "application-debuggable" <<<"$BADGING"; then
       bad "release APK is debuggable — adb run-as could read users' tokens"
+      ran=$((ran+1))
     else
       note "OK   not debuggable"
+      ran=$((ran+1))
     fi
-    ran=$((ran+1))
   else
     # A release build with no way to check this is not a pass — it is an
     # unverified release. Skipping quietly here would let "verification
@@ -127,12 +152,20 @@ if [ "$SIGNING" != debug ]; then
               -name apksigner 2>/dev/null | sort -V | tail -1) || true
   if [ -n "$APKSIGNER" ]; then
     CERTS=$("$APKSIGNER" verify --print-certs "$APK" 2>/dev/null || true)
-    if grep -qi "CN=Android Debug" <<<"$CERTS"; then
+    # apksigner exits nonzero on "DOES NOT VERIFY", a v1-only/minSdk
+    # mismatch, or a broken signing block — `2>/dev/null || true` hides
+    # that too. "Signer #1 certificate DN" is the first line of real
+    # output; requiring it before trusting an absence of the debug CN is
+    # the same fix as above, for the same reason.
+    if ! grep -q "Signer #1 certificate DN" <<<"$CERTS"; then
+      bad "cannot verify signing key — apksigner produced no usable output"
+    elif grep -qi "CN=Android Debug" <<<"$CERTS"; then
       bad "release APK carries the universal Android debug key"
+      ran=$((ran+1))
     else
       note "OK   not signed with the debug key"
+      ran=$((ran+1))
     fi
-    ran=$((ran+1))
   else
     bad "cannot verify signing key — apksigner not found, and a release APK must not go out unverified"
   fi
