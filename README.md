@@ -201,7 +201,8 @@ bundle in is how this route works around that.
 - **Look up any single date**, past or future, with the date picker beside the
   range dropdown — the one thing the rolling window cannot reach, since it
   always starts at the current moment. Picking a date shows that day on its
-  own; **Today** returns to the rolling agenda. An event is listed when it
+  own; **✕ Clear** returns to the rolling agenda, and so does simply choosing
+  a range again — the dropdown stays live for exactly that reason. An event is listed when it
   *overlaps* the day, so an 11pm-to-1am meeting appears on both dates it
   touches. The stat tiles are hidden while a date is selected: every one of
   them ("meetings today", "next 7 days", "until next meeting") is measured
@@ -260,7 +261,7 @@ TIMEZONE = "America/Los_Angeles"
 DAYS_AHEAD = 30
 POLL_MINUTES = 5
 PORT = 8756
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 ```
 
 ## Development
@@ -286,7 +287,7 @@ The whole application is one file, `ourcal.py`, with the interface embedded as
 an HTML/CSS/JS string. That is deliberate — see [Contributing](#contributing).
 
 **Releases** are cut by bumping `VERSION` in `ourcal.py`, then pushing a
-matching tag (`git tag v1.0.1 && git push origin v1.0.1`) or running the release
+matching tag (`git tag v1.0.2 && git push origin v1.0.2`) or running the release
 workflow manually. The workflow refuses to build when the tag and `VERSION`
 disagree.
 

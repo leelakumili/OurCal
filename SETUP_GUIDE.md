@@ -325,6 +325,12 @@ whole reason to export first. Releases signed with the same keystore install
 over each other cleanly, so this is a one-time cost when the key changes,
 not something that recurs on every update.
 
+**I picked a date and can't get back to the normal agenda.**
+Two ways out, either works: press **✕ Clear** beside the date box, or just
+choose a range from the dropdown again (**Next 30 days** and the rest) — doing
+that clears the date for you. The date is never remembered between runs, so
+restarting OurCal also returns you to the rolling agenda.
+
 **A date I picked shows fewer events than I expected.**
 The day view fetches only that day, and lists an event when it *overlaps* the
 day — so an 11pm-to-1am meeting appears on both dates it touches, and a
