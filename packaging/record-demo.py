@@ -106,7 +106,21 @@ def desktop_tour(page, url, shot=None):
     snap(page, shot, "08-delete")
     page.click("#delCancelBtn")
     settle(page, 1400)
-    snap(page, shot, "09-end")
+    snap(page, shot, "09-cancelled")
+
+    # The date view. Set from the browser's own clock rather than a literal so
+    # the clip always lands on a day the fixtures actually populate.
+    page.evaluate("""() => {
+      const el = document.getElementById('dateSel');
+      el.value = new Date().toLocaleDateString('en-CA');
+      el.dispatchEvent(new Event('change'));
+    }""")
+    settle(page, 2400)
+    snap(page, shot, "10-date-view")
+
+    page.click("#todayBtn")
+    settle(page, 1800)
+    snap(page, shot, "11-end")
 
 
 def phone_tour(page, url, shot=None):

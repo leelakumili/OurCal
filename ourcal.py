@@ -612,6 +612,19 @@ def day_window(on_date):
     return _iso(start), _iso(end)
 
 
+def _localize(dt):
+    """Read a naive timestamp as local time in TIMEZONE.
+
+    build_event_body writes "2026-08-19T14:00:00" with no offset and carries
+    the zone in a separate timeZone field, which is what Google's API expects
+    — so every event created through OurCal is naive in the demo store, and
+    Google echoes an offset back only on the real path. Comparing the two
+    kinds raises TypeError, which surfaced as HTTP 500 on the day view the
+    moment anyone created an event and then picked a date.
+    """
+    return dt if dt.tzinfo else dt.replace(tzinfo=tz())
+
+
 def event_on_date(ev, on_date):
     """Does this normalized event overlap on_date, in TIMEZONE?
 
@@ -630,11 +643,12 @@ def event_on_date(ev, on_date):
         return start <= on_date < end
     lo, hi = day_window(on_date)
     try:
-        start = datetime.fromisoformat(str(ev.get("start")))
-        end = datetime.fromisoformat(str(ev.get("end")))
+        start = _localize(datetime.fromisoformat(str(ev.get("start"))))
+        end = _localize(datetime.fromisoformat(str(ev.get("end"))))
     except (TypeError, ValueError):
         return False
-    return start < datetime.fromisoformat(hi) and end > datetime.fromisoformat(lo)
+    return (start < _localize(datetime.fromisoformat(hi))
+            and end > _localize(datetime.fromisoformat(lo)))
 
 
 def get_events(now=None, days=None, on_date=None):

@@ -1962,6 +1962,21 @@ class TestEventOnDate(unittest.TestCase):
         self.assertFalse(ourcal.event_on_date(
             self._timed("not-a-date", "also-not"), datetime.date(2026, 8, 19)))
 
+    def test_naive_timestamps_are_read_as_local(self):
+        # build_event_body writes "2026-08-19T14:00:00" with no offset and
+        # carries the zone in a separate timeZone field, which Google accepts.
+        # The demo store keeps that verbatim, so anything created through the
+        # UI is naive — and comparing it to aware bounds raised TypeError,
+        # surfacing as HTTP 500 the moment you picked a date after creating an
+        # event.
+        ev = self._timed("2026-08-19T14:00:00", "2026-08-19T15:00:00")
+        self.assertTrue(ourcal.event_on_date(ev, datetime.date(2026, 8, 19)))
+        self.assertFalse(ourcal.event_on_date(ev, datetime.date(2026, 8, 20)))
+
+    def test_mixed_naive_and_aware_do_not_raise(self):
+        ev = self._timed("2026-08-19T23:00:00", "2026-08-20T01:00:00-07:00")
+        self.assertTrue(ourcal.event_on_date(ev, datetime.date(2026, 8, 19)))
+
 
 class TestGetEventsOnDate(unittest.TestCase):
     def setUp(self):
@@ -2009,6 +2024,19 @@ class TestGetEventsOnDate(unittest.TestCase):
         got = ourcal.get_events(on_date=datetime.date(2026, 8, 19))
         for key in ("accounts", "errors", "timezone", "updated", "days"):
             self.assertIn(key, got)
+
+    def test_a_created_event_does_not_break_the_day_view(self):
+        # End to end for the naive-timestamp bug: create through the real
+        # entry point, then ask for that day. This returned HTTP 500 before
+        # event_on_date localised naive timestamps.
+        today = datetime.datetime.now(ourcal.tz()).date()
+        ourcal.create_event({
+            "title": "Design review", "date": today.isoformat(),
+            "startTime": "14:00", "endTime": "15:00", "mode": "copies",
+            "targets": [{"label": "Personal", "blocking": True}],
+        })
+        got = ourcal.get_events(on_date=today)
+        self.assertIn("Design review", [e["title"] for e in got["events"]])
 
     def test_google_collect_uses_the_day_window(self):
         # The Google path must narrow too — the demo filter above would mask
