@@ -1925,6 +1925,109 @@ class TestDayWindow(unittest.TestCase):
         self.assertEqual(self._span_hours(datetime.date(2025, 2, 3)), 24)
 
 
+class TestEventOnDate(unittest.TestCase):
+    def setUp(self):
+        ourcal._TZ = None
+        self.addCleanup(lambda: setattr(ourcal, "_TZ", None))
+
+    def _timed(self, start, end):
+        return {"start": start, "end": end, "allDay": False}
+
+    def test_timed_event_inside_the_day(self):
+        ev = self._timed("2026-08-19T09:00:00-07:00", "2026-08-19T10:00:00-07:00")
+        self.assertTrue(ourcal.event_on_date(ev, datetime.date(2026, 8, 19)))
+
+    def test_timed_event_on_another_day(self):
+        ev = self._timed("2026-08-20T09:00:00-07:00", "2026-08-20T10:00:00-07:00")
+        self.assertFalse(ourcal.event_on_date(ev, datetime.date(2026, 8, 19)))
+
+    def test_event_spanning_midnight_counts_for_both_days(self):
+        # Google returns anything overlapping the window; the day view agrees.
+        ev = self._timed("2026-08-18T23:00:00-07:00", "2026-08-19T01:00:00-07:00")
+        self.assertTrue(ourcal.event_on_date(ev, datetime.date(2026, 8, 18)))
+        self.assertTrue(ourcal.event_on_date(ev, datetime.date(2026, 8, 19)))
+
+    def test_all_day_event_end_is_exclusive(self):
+        ev = {"start": "2026-08-19", "end": "2026-08-20", "allDay": True}
+        self.assertTrue(ourcal.event_on_date(ev, datetime.date(2026, 8, 19)))
+        self.assertFalse(ourcal.event_on_date(ev, datetime.date(2026, 8, 20)))
+
+    def test_multi_day_all_day_event_covers_the_middle(self):
+        ev = {"start": "2026-08-18", "end": "2026-08-21", "allDay": True}
+        for d in (18, 19, 20):
+            self.assertTrue(ourcal.event_on_date(ev, datetime.date(2026, 8, d)), d)
+        self.assertFalse(ourcal.event_on_date(ev, datetime.date(2026, 8, 21)))
+
+    def test_unparseable_timestamps_are_excluded_not_raised(self):
+        self.assertFalse(ourcal.event_on_date(
+            self._timed("not-a-date", "also-not"), datetime.date(2026, 8, 19)))
+
+
+class TestGetEventsOnDate(unittest.TestCase):
+    def setUp(self):
+        os.environ["OURCAL_DEMO"] = "1"
+        ourcal._TZ = None
+        ourcal.reset_demo(datetime.datetime(2026, 8, 19, 9, 0,
+                                            tzinfo=ZoneInfo(ourcal.TIMEZONE)))
+        self.addCleanup(lambda: setattr(ourcal, "_TZ", None))
+        self.addCleanup(lambda: setattr(ourcal, "_DEMO_STORE", None))
+
+    def test_rolling_call_reports_date_none(self):
+        self.assertIsNone(ourcal.get_events(days="30")["date"])
+
+    def test_echoes_the_requested_date(self):
+        got = ourcal.get_events(on_date=datetime.date(2026, 8, 19))
+        self.assertEqual(got["date"], "2026-08-19")
+
+    def test_returns_only_that_days_events(self):
+        target = datetime.date(2026, 8, 19)
+        got = ourcal.get_events(on_date=target)
+        self.assertTrue(got["events"], "fixture day should not be empty")
+        for ev in got["events"]:
+            self.assertTrue(ourcal.event_on_date(ev, target), ev["title"])
+
+    def test_narrows_the_rolling_set(self):
+        # The whole point: demo mode ignores `days` and holds every fixture,
+        # so without a filter here the day view would show all of them.
+        rolling = ourcal.get_events(days="365")["events"]
+        day = ourcal.get_events(on_date=datetime.date(2026, 8, 19))["events"]
+        self.assertLess(len(day), len(rolling))
+
+    def test_a_date_with_no_events_returns_an_empty_list(self):
+        got = ourcal.get_events(on_date=datetime.date(2019, 1, 1))
+        self.assertEqual(got["events"], [])
+        self.assertEqual(got["date"], "2019-01-01")
+
+    def test_days_is_ignored_when_a_date_is_given(self):
+        target = datetime.date(2026, 8, 19)
+        wide = ourcal.get_events(days="365", on_date=target)
+        narrow = ourcal.get_events(days="1", on_date=target)
+        self.assertEqual([e["uid"] for e in wide["events"]],
+                         [e["uid"] for e in narrow["events"]])
+
+    def test_envelope_keys_survive(self):
+        got = ourcal.get_events(on_date=datetime.date(2026, 8, 19))
+        for key in ("accounts", "errors", "timezone", "updated", "days"):
+            self.assertIn(key, got)
+
+    def test_google_collect_uses_the_day_window(self):
+        # The Google path must narrow too — the demo filter above would mask
+        # a _google_collect that quietly kept asking for now..now+days.
+        seen = {}
+
+        def fake(label, email, time_min, time_max):
+            seen["min"], seen["max"] = time_min, time_max
+            return [], None
+
+        self.addCleanup(setattr, ourcal, "list_account_events",
+                        ourcal.list_account_events)
+        ourcal.list_account_events = fake
+        ourcal._google_collect(datetime.datetime.now(ourcal.tz()),
+                               days=365, on_date=datetime.date(2026, 8, 19))
+        self.assertTrue(seen["min"].startswith("2026-08-19T00:00:00"), seen)
+        self.assertTrue(seen["max"].startswith("2026-08-20T00:00:00"), seen)
+
+
 class TestEventsWindow(unittest.TestCase):
     def setUp(self):
         os.environ["OURCAL_DEMO"] = "1"

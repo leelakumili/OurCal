@@ -637,7 +637,7 @@ def event_on_date(ev, on_date):
     return start < datetime.fromisoformat(hi) and end > datetime.fromisoformat(lo)
 
 
-def get_events(now=None, days=None):
+def get_events(now=None, days=None, on_date=None):
     now = now or datetime.now(tz())
     days = clamp_days(days)
     errors = []
@@ -646,13 +646,20 @@ def get_events(now=None, days=None):
             reset_demo(now)
         accounts = demo_accounts()
         events = merge_events(_DEMO_STORE)
+        # Demo mode ignores `days` and always holds the whole fixture store,
+        # so the date view has to filter here. Without this the feature would
+        # be broken in demo mode and every test of it would assert nothing.
+        if on_date is not None:
+            events = [e for e in events if event_on_date(e, on_date)]
     else:
         accounts = ACCOUNTS
-        events, errors = _google_collect(now, days)  # defined in GOOGLE section
+        # defined in GOOGLE section
+        events, errors = _google_collect(now, days, on_date)
     return {
         "updated": _iso(now),
         "timezone": TIMEZONE,
         "days": days,
+        "date": on_date.isoformat() if on_date else None,
         "accounts": _accounts_meta(accounts),
         "events": events,
         "errors": errors,
@@ -964,9 +971,12 @@ def list_account_events(label, email, time_min, time_max):
                     "setup": False, "signin": False}
 
 
-def _google_collect(now, days=None):
-    time_min = _iso(now)
-    time_max = _iso(now + timedelta(days=clamp_days(days)))
+def _google_collect(now, days=None, on_date=None):
+    if on_date is not None:
+        time_min, time_max = day_window(on_date)
+    else:
+        time_min = _iso(now)
+        time_max = _iso(now + timedelta(days=clamp_days(days)))
     all_events, errors = [], []
     for a in ACCOUNTS:
         evs, err = list_account_events(a["label"], a["email"], time_min, time_max)
@@ -2681,8 +2691,9 @@ class OurCalHandler(BaseHTTPRequestHandler):
             elif self.path.split("?")[0] == "/api/events":
                 from urllib.parse import parse_qs, urlparse
                 q = parse_qs(urlparse(self.path).query)
-                self._send(200, json.dumps(
-                    get_events(days=(q.get("days") or [None])[0])))
+                self._send(200, json.dumps(get_events(
+                    days=(q.get("days") or [None])[0],
+                    on_date=parse_view_date((q.get("date") or [None])[0]))))
             elif self.path == "/setup" or self.path.startswith("/setup?"):
                 self._send(200,
                            SETUP_PAGE.replace("__SESSION_TOKEN__", SESSION_TOKEN),
