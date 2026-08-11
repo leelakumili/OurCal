@@ -287,7 +287,12 @@ jobs:
           # one; run_number keeps repeat dispatches at the same version from
           # colliding with each other too.
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}-dispatch-{1}', needs.macos.outputs.version, github.run_number) }}
-          name: ${{ github.ref_type == 'tag' && format('OurCal {0}', needs.macos.outputs.version) || format('OurCal {0} (dispatch #{1})', needs.macos.outputs.version, github.run_number) }}
+          # Quoted, unlike tag_name above, and it has to be: "(dispatch #{1})"
+          # puts a space before a '#', which in a plain YAML scalar starts a
+          # comment. Unquoted, YAML silently truncated this value mid-expression
+          # and GitHub rejected the whole file with "The expression is not
+          # closed" — the workflow would not parse, so no release could run.
+          name: "${{ github.ref_type == 'tag' && format('OurCal {0}', needs.macos.outputs.version) || format('OurCal {0} (dispatch #{1})', needs.macos.outputs.version, github.run_number) }}"
           # The gate above only runs on a tag — a workflow_dispatch build can
           # still land here debug-signed or paste-only. Without this, that
           # build would publish to the same public Releases page and, being
