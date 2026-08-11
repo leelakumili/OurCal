@@ -234,7 +234,7 @@ PORT = 8756
 SESSION_TOKEN = secrets.token_urlsafe(32)
 # Single source of truth for the version: the release workflow reads it from
 # here, so a tag can never disagree with what the app reports.
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 # Colorblind-safe categorical palette (parallel light/dark arrays).
 PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]

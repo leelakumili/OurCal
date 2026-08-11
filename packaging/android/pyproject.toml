@@ -7,7 +7,7 @@
 [tool.briefcase]
 project_name = "OurCal"
 bundle = "com.leelakumili"
-version = "1.0.1"
+version = "1.0.2"
 license = "MIT"
 
 [tool.briefcase.app.ourcal]
