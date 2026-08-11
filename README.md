@@ -39,8 +39,8 @@ screen-captured (`packaging/record-demo.py`), so re-recording after a UI
 change cannot accidentally put a real calendar on the internet.
 
 **On a Mac** — the unified agenda, widening the range to three months,
-creating an event across accounts, then syncing, editing and deleting a row
-at its source:
+creating an event across accounts, syncing, editing and deleting a row at its
+source, then looking up a single date with the picker:
 
 ![OurCal on macOS](docs/demo/ourcal-desktop.gif)
 
