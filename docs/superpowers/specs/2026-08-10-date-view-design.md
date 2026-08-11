@@ -76,10 +76,8 @@ def parse_view_date(value):
 def day_window(on_date):
     """(time_min, time_max) RFC3339 strings spanning on_date in TIMEZONE.
 
-    Local midnight to the next local midnight. Uses tz() so it is correct
-    across DST transitions, where a day is 23 or 25 hours rather than 24 —
-    computing midnight + 24h would silently drop or duplicate an hour of
-    events twice a year.
+    Local midnight to the next local midnight, both built from tz()-aware
+    datetimes so the offsets are the zone's real offsets on those dates.
     """
 
 
@@ -100,13 +98,33 @@ The response payload gains one key:
 `"date"` is `null` on a rolling request. The client reads it to confirm what it
 actually got rather than assuming its request was honoured.
 
-### DST correctness
+### DST — and a testing trap that matters more
 
-`day_window` must build both bounds from `tz()`-aware datetimes rather than
-adding `timedelta(days=1)` to a naive midnight. On a spring-forward day the
-local day is 23 hours; on fall-back it is 25. A naive +24h window would miss
-the last hour of one day a year and double-count an hour on another. This is
-cheap to get right at construction and invisible when wrong.
+The obvious worry is that a spring-forward day is 23 hours and a fall-back day
+25, so "midnight + 24h" would drop or duplicate an hour twice a year.
+
+**Measured, that worry is unfounded here.** Arithmetic on a ZoneInfo-aware
+datetime is *wall-clock* arithmetic: `midnight + timedelta(days=1)`
+re-normalises to the next local midnight and picks up the new offset.
+Both forms produce identical bounds on 2026-03-08 (23h) and 2026-11-01 (25h).
+The failure mode only exists with naive datetimes or fixed offsets, neither of
+which this codebase uses — `tz()` returns a `ZoneInfo`.
+
+What *is* a real trap is testing it. CPython short-circuits `b - a` to a naive
+subtraction when both operands share the same `tzinfo` instance, so:
+
+```python
+a, b = both_from_day_window(date(2026, 3, 8))
+(b - a).total_seconds() / 3600      # 24.0 — wrong, and passes either way
+(b.astimezone(utc) - a.astimezone(utc)).total_seconds() / 3600   # 23.0 — real
+```
+
+A DST test written the first way asserts nothing: it reports 24 hours whatever
+the implementation does. **The tests must convert to UTC before subtracting.**
+
+The DST assertions are kept — not because the naive form is broken today, but
+because they pin the property so a later switch to fixed offsets or naive
+arithmetic fails loudly rather than silently shifting an hour of someone's day.
 
 ---
 
@@ -239,9 +257,10 @@ tests (`tests/test_ourcal.py:1844-1874`):
 - `parse_view_date` accepts `"2026-08-19"`; returns `None` for `""`, `None`,
   `"banana"`, `"2026-13-45"`, `"19-08-2026"`.
 - `day_window` spans exactly one local day, starting at local midnight.
-- `day_window` is 23 hours on a spring-forward date and 25 on a fall-back date
-  in a DST-observing zone — the assertion that a naive `+timedelta(days=1)`
-  implementation fails.
+- `day_window` is 23 hours across 2026-03-08 and 25 across 2026-11-01 in
+  `America/Los_Angeles` (the configured default), **measured after converting
+  both bounds to UTC** — see "DST and a testing trap" above; subtracting two
+  same-`tzinfo` datetimes reports 24 hours regardless and asserts nothing.
 - `get_events(on_date=...)` returns only that day's events in demo mode.
 - `get_events(on_date=...)["date"]` echoes the requested date; a rolling call
   returns `None`.
