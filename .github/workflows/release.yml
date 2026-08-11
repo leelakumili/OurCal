@@ -184,6 +184,32 @@ jobs:
             echo "no ANDROID_KEYSTORE_B64 — this APK will be debug-signed"
           fi
 
+      - name: Accept the Android SDK licenses
+        # ANDROID_HOME is pinned empty above, so Briefcase downloads its own
+        # SDK — and a freshly downloaded SDK has no accepted licenses. On a
+        # developer's machine sdkmanager asks once and caches the answer
+        # forever, which is why this never surfaced locally; a runner has no
+        # TTY, so the prompt reads EOF, declines, and the build dies with
+        # "7 of 7 SDK package licenses not accepted" (exit 200) before any
+        # APK exists.
+        #
+        # These are byte-for-byte what sdkmanager itself writes when you
+        # answer 'y' — copied from the maintainer's own accepted licenses
+        # rather than transcribed from memory, so they match the SDK
+        # revision Briefcase actually pulls.
+        run: |
+          SDK="$HOME/.cache/briefcase/tools/android_sdk/licenses"
+          mkdir -p "$SDK"
+          accept() { printf '\n%s' "$2" > "$SDK/$1"; }
+          accept android-sdk-license           24333f8a63b6825ea9c5514f83c2829b004d1fee
+          accept android-sdk-preview-license   84831b9409646a918e30573bab4c9c91346d8abd
+          accept android-sdk-arm-dbt-license   859f317696f67ef3d7f30a50a5560e7834b43903
+          accept android-googletv-license      601085b94cd77f0b54ff86406957099ebe79c4d6
+          accept android-googlexr-license      ceff83576aac4f7f37cb98fe189e9fb3c49d3b81
+          accept google-gdk-license            33b6a2b64607f11b759f320ef9dff4ae5c47d97a
+          accept mips-android-sysimage-license e9acab5b5fbb560a72cfaecce8946896ff6aab9d
+          echo "accepted $(ls "$SDK" | wc -l) SDK licenses in $SDK"
+
       - name: Build the APK
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
