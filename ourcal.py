@@ -1955,8 +1955,11 @@ PAGE = r"""<!doctype html>
     .ev{flex-wrap:wrap}
     .rowacts{opacity:1;width:100%;margin-left:0;margin-top:8px;justify-content:flex-end}
   }
-  #rangeSel{font-size:13px;padding:6px 8px;border-radius:9px;border:1px solid var(--border);
+  #rangeSel,#dateSel{font-size:13px;padding:6px 8px;border-radius:9px;border:1px solid var(--border);
     background:var(--card);color:var(--text);cursor:pointer}
+  /* Disabled rather than hidden while a date is selected: the control stays
+     where it was so it is obvious why the range stopped applying. */
+  #rangeSel:disabled{opacity:.45;cursor:not-allowed}
   .toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:60}
   .toast{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--live);border-radius:10px;padding:10px 14px;box-shadow:var(--shadow);font-size:13px;max-width:320px}
   .toast.err{border-left-color:var(--danger)}
@@ -1981,6 +1984,8 @@ PAGE = r"""<!doctype html>
       <option value="180">Next 6 months</option>
       <option value="365">Next year</option>
     </select>
+    <input type="date" id="dateSel" title="Show a specific date">
+    <button id="todayBtn" title="Back to the rolling agenda" hidden>Today</button>
     <button class="icon-btn" id="themeBtn" title="Toggle light / dark">🌓</button>
     <button id="refreshBtn" title="Refresh now">↻ Refresh</button>
     <button class="btn-primary" id="newBtn">+ New event / Block time</button>
@@ -2125,7 +2130,10 @@ function fmtDayHeading(key){
   const tmr=new Date(); tmr.setDate(tmr.getDate()+1);
   const tk=new Intl.DateTimeFormat("en-CA",{timeZone:tz(),year:"numeric",month:"2-digit",day:"2-digit"}).format(tmr);
   if(key===tk) return "Tomorrow · "+wd;
-  return wd;
+  // The date picker reaches any year, and "Monday, Feb 3" is ambiguous once
+  // it can mean 2025. Within the current year the year stays off.
+  const thisYear=new Intl.DateTimeFormat("en-CA",{timeZone:tz(),year:"numeric"}).format(new Date());
+  return String(y)===thisYear ? wd : wd+", "+y;
 }
 function durText(ev){
   if(ev.allDay) return "All day";
@@ -2173,9 +2181,20 @@ function countdown(nextStart){
 function render(){
   if(!DATA) return;
   try{ document.getElementById("stamp").textContent="updated "+new Intl.DateTimeFormat("en-US",{timeZone:tz(),hour:"2-digit",minute:"2-digit"}).format(new Date(DATA.updated)); }catch(e){}
-  const s=computeStats(DATA.events);
-  const tiles=[[s.today,"meetings today"],[s.next7,"next 7 days"],[s.hours.toFixed(1),"hours in meetings (7d)"],[countdown(s.nextStart),"until next meeting"]];
-  document.getElementById("tiles").innerHTML=tiles.map(t=>`<div class="tile"><div class="n">${esc(t[0])}</div><div class="l">${t[1]}</div></div>`).join("");
+  // Every tile is measured from now — "meetings today", "next 7 days",
+  // "until next meeting". On a day view only that one day was fetched, so
+  // they would render four confidently wrong numbers rather than an empty
+  // state. Hide them instead; the day list below answers the question asked.
+  const dayView=!!DATA.date;
+  const tilesEl=document.getElementById("tiles");
+  tilesEl.hidden=dayView;
+  if(dayView){
+    tilesEl.innerHTML="";
+  } else {
+    const s=computeStats(DATA.events);
+    const tiles=[[s.today,"meetings today"],[s.next7,"next 7 days"],[s.hours.toFixed(1),"hours in meetings (7d)"],[countdown(s.nextStart),"until next meeting"]];
+    tilesEl.innerHTML=tiles.map(t=>`<div class="tile"><div class="n">${esc(t[0])}</div><div class="l">${t[1]}</div></div>`).join("");
+  }
 
   const chips=document.getElementById("chips");
   chips.innerHTML=(DATA.accounts||[]).map(a=>`<span class="chip ${hidden.has(a.label)?"off":""}" data-label="${esc(a.label)}"><span class="dot" style="background:${colorFor(a.color)}"></span><span>${esc(a.label)}</span><span class="ct">${labelCount(a.label)}</span></span>`).join("");
@@ -2194,15 +2213,32 @@ function render(){
 
   const box=document.getElementById("agenda");
   const evs=DATA.events.filter(visible);
-  if(!evs.length){ box.innerHTML='<div class="empty">No events in the next 30 days 🎉</div>'; return; }
-  const groups={}, keys=[];
-  for(const ev of evs){ const k=dayKey(ev.start,ev.allDay); if(!groups[k]){groups[k]=[];keys.push(k);} groups[k].push(ev); }
-  keys.sort();
+  if(!evs.length){
+    // The rolling message used to hardcode "30 days" whatever the dropdown
+    // said, so anyone on "Next year" with an empty calendar was told the
+    // wrong thing.
+    box.innerHTML = dayView
+      ? '<div class="empty">Nothing scheduled on '+esc(fmtDayHeading(DATA.date))+'</div>'
+      : '<div class="empty">No events in the next '+esc(String(DATA.days))+' days 🎉</div>';
+    return;
+  }
   let html="";
   ROWS=[];
-  for(const k of keys){
-    html+=`<div class="day">${esc(fmtDayHeading(k))}</div>`;
-    for(const ev of groups[k]){ try{ html+=evRow(ev,ROWS.push(ev)-1); }catch(e){} }
+  if(dayView){
+    // One heading, events in start order. Grouping by start-day would file an
+    // event that began at 11pm yesterday under yesterday's heading, while the
+    // user is looking at a single day.
+    const ordered=evs.slice().sort((a,b)=>String(a.start).localeCompare(String(b.start)));
+    html+=`<div class="day">${esc(fmtDayHeading(DATA.date))}</div>`;
+    for(const ev of ordered){ try{ html+=evRow(ev,ROWS.push(ev)-1); }catch(e){} }
+  } else {
+    const groups={}, keys=[];
+    for(const ev of evs){ const k=dayKey(ev.start,ev.allDay); if(!groups[k]){groups[k]=[];keys.push(k);} groups[k].push(ev); }
+    keys.sort();
+    for(const k of keys){
+      html+=`<div class="day">${esc(fmtDayHeading(k))}</div>`;
+      for(const ev of groups[k]){ try{ html+=evRow(ev,ROWS.push(ev)-1); }catch(e){} }
+    }
   }
   box.innerHTML=html;
   box.querySelectorAll(".mini").forEach(b=>b.onclick=()=>{
@@ -2244,8 +2280,11 @@ function evRow(ev,idx){
 }
 
 function rangeDays(){ return localStorage.getItem("ourcal-days") || "30"; }
+function viewDate(){ const el=document.getElementById("dateSel"); return el?el.value:""; }
 function load(){
-  api("/api/events?days="+encodeURIComponent(rangeDays()))
+  const vd=viewDate();
+  api(vd ? "/api/events?date="+encodeURIComponent(vd)
+         : "/api/events?days="+encodeURIComponent(rangeDays()))
     .then(r=>r.text().then(t=>{ if(!r.ok) throw new Error("HTTP "+r.status+": "+t.slice(0,300)); return JSON.parse(t); }))
     .then(d=>{ DATA=d; render(); })
     // Surface the actual reason, not a generic "could not reach". A fetch that
@@ -2267,6 +2306,23 @@ function applyTheme(t){ t?document.documentElement.setAttribute("data-theme",t):
     toast("Loading "+sel.options[sel.selectedIndex].text.toLowerCase()+"…");
     load();
   };
+})();
+
+/* date view. Deliberately not persisted: ourcal-days is a standing
+   preference, a specific date is a one-off lookup, and reopening OurCal
+   pinned to a date picked days ago would be a bug rather than a feature. */
+(function(){
+  const el=document.getElementById("dateSel");
+  const todayBtn=document.getElementById("todayBtn");
+  const range=document.getElementById("rangeSel");
+  function sync(){
+    const on=!!el.value;
+    todayBtn.hidden=!on;
+    range.disabled=on;      // "Next 30 days" means nothing while on one day
+  }
+  el.onchange=()=>{ sync(); if(el.value) toast("Loading "+el.value+"…"); load(); };
+  todayBtn.onclick=()=>{ el.value=""; sync(); load(); };
+  sync();
 })();
 document.getElementById("themeBtn").onclick=()=>{
   const cur=document.documentElement.getAttribute("data-theme");

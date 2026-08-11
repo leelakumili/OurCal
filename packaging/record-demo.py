@@ -198,7 +198,9 @@ def main():
                  "&& python3 -m playwright install chromium")
 
     out_dir = pathlib.Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if not args.check:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    check_dir = pathlib.Path(tempfile.mkdtemp(prefix="ourcal-check-"))
 
     # An empty directory holding nothing but a copy of the app: this is what
     # keeps the maintainer's real accounts and credentials out of the frame.
@@ -224,7 +226,10 @@ def main():
                 kwargs = {"viewport": size, "device_scale_factor": 2}
                 shot = None
                 if args.check:
-                    shot = out_dir / f"check-{name}"
+                    # Into the temp workspace, not out_dir: --check is a
+                    # developer smoke test and must not leave untracked
+                    # screenshot directories inside docs/demo/.
+                    shot = check_dir / name
                     shot.mkdir(parents=True, exist_ok=True)
                 else:
                     kwargs["record_video_dir"] = str(work / f"vid-{name}")
@@ -236,9 +241,12 @@ def main():
                 except Exception as exc:
                     failed = True
                     print(f"  {name}: FAILED — {type(exc).__name__}: {exc}")
-                    page.screenshot(path=str(out_dir / f"FAILURE-{name}.png"))
+                    page.screenshot(path=str((check_dir if args.check else out_dir)
+                                             / f"FAILURE-{name}.png"))
                 ctx.close()
-                if not args.check and not failed:
+                if args.check:
+                    print(f"  {name}: ok")
+                elif not failed:
                     webm = next((work / f"vid-{name}").glob("*.webm"))
                     mp4, gif = convert(webm, out_dir, name, gif_width)
                     print(f"  {name}: {mp4.name} ({mp4.stat().st_size // 1024}K), "
@@ -248,7 +256,7 @@ def main():
         server.shutdown()
         shutil.rmtree(work, ignore_errors=True)
 
-    print("wrote", out_dir)
+    print("wrote", check_dir if args.check else out_dir)
     sys.exit(1 if failed else 0)
 
 
