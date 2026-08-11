@@ -152,19 +152,31 @@ this feature and is unrelated to it.
 One new control in the header, beside the existing range dropdown:
 
 ```
-[ Next 30 days ▾ ]  [ 📅 dd/mm/yyyy ]  [ Today ]  [ 🌓 ]  [ ↻ Refresh ]  [ + New event ]
+[ Next 30 days ▾ ]  [ 📅 dd/mm/yyyy ]  [ ✕ Clear ]  [ 🌓 ]  [ ↻ Refresh ]  [ + New event ]
 ```
 
 - `<input type="date" id="dateSel">`, empty by default.
-- A **Today** button, rendered only while a date is set, that clears it.
+- A **✕ Clear** button, rendered only while a date is set, that clears it.
 
 ### Behaviour
 
 | State | Result |
 |---|---|
 | `#dateSel` empty | Identical to today. `#rangeSel` drives the fetch; nothing changes for anyone who never touches the picker. |
-| `#dateSel` set | `#rangeSel` disabled and dimmed. Fetch sends `?date=` instead of `?days=`. Agenda shows that day only. |
-| **Today** clicked | `#dateSel` cleared, `#rangeSel` re-enabled, rolling agenda restored. |
+| `#dateSel` set | Fetch sends `?date=` instead of `?days=`. Agenda shows that day only. **`#rangeSel` stays enabled** — see below. |
+| **✕ Clear** clicked | `#dateSel` cleared, rolling agenda restored. |
+| A range chosen while a date is set | Clears the date and returns to the rolling agenda. |
+
+**Corrected after testing.** This first shipped with `#rangeSel` *disabled*
+while a date was selected, reasoning that "Next 30 days" means nothing on a
+single day. That was logical purity at the cost of the escape route: the
+range dropdown is the control people were already using, so it is the first
+thing they reach for to get back — and it was greyed out. The only way out
+was a button labelled "Today", which reads as "jump to today" rather than
+"leave this view".
+
+Now there are two ways out, and the dropdown stays enabled to be one of them.
+The button is labelled **✕ Clear**.
 
 The date is **not** written to `localStorage`. `ourcal-days` persists because a
 range is a standing preference; reopening OurCal to find it pinned to a date

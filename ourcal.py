@@ -1971,9 +1971,6 @@ PAGE = r"""<!doctype html>
   }
   #rangeSel,#dateSel{font-size:13px;padding:6px 8px;border-radius:9px;border:1px solid var(--border);
     background:var(--card);color:var(--text);cursor:pointer}
-  /* Disabled rather than hidden while a date is selected: the control stays
-     where it was so it is obvious why the range stopped applying. */
-  #rangeSel:disabled{opacity:.45;cursor:not-allowed}
   .toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:60}
   .toast{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--live);border-radius:10px;padding:10px 14px;box-shadow:var(--shadow);font-size:13px;max-width:320px}
   .toast.err{border-left-color:var(--danger)}
@@ -1999,7 +1996,7 @@ PAGE = r"""<!doctype html>
       <option value="365">Next year</option>
     </select>
     <input type="date" id="dateSel" title="Show a specific date">
-    <button id="todayBtn" title="Back to the rolling agenda" hidden>Today</button>
+    <button id="todayBtn" title="Clear the date and go back to the rolling agenda" hidden>✕ Clear</button>
     <button class="icon-btn" id="themeBtn" title="Toggle light / dark">🌓</button>
     <button id="refreshBtn" title="Refresh now">↻ Refresh</button>
     <button class="btn-primary" id="newBtn">+ New event / Block time</button>
@@ -2314,6 +2311,11 @@ function applyTheme(t){ t?document.documentElement.setAttribute("data-theme",t):
   const sel=document.getElementById("rangeSel");
   sel.value=rangeDays();
   sel.onchange=()=>{
+    // Picking a range is how most people will try to leave the day view —
+    // it is the control they were using before. Clearing the date here is
+    // what makes that work; disabling this dropdown instead (as this first
+    // shipped) left the obvious way back greyed out.
+    clearViewDate();
     localStorage.setItem("ourcal-days", sel.value);
     // A wider window means more Google calls, so say something rather than
     // leaving the agenda looking frozen.
@@ -2324,19 +2326,24 @@ function applyTheme(t){ t?document.documentElement.setAttribute("data-theme",t):
 
 /* date view. Deliberately not persisted: ourcal-days is a standing
    preference, a specific date is a one-off lookup, and reopening OurCal
-   pinned to a date picked days ago would be a bug rather than a feature. */
+   pinned to a date picked days ago would be a bug rather than a feature.
+
+   Two ways out, on purpose: the ✕ Clear button, and simply choosing a range
+   again. The range dropdown stays enabled precisely so it can be one of
+   them. */
+function syncDateControls(){
+  const el=document.getElementById("dateSel");
+  document.getElementById("todayBtn").hidden=!el.value;
+}
+function clearViewDate(){
+  document.getElementById("dateSel").value="";
+  syncDateControls();
+}
 (function(){
   const el=document.getElementById("dateSel");
-  const todayBtn=document.getElementById("todayBtn");
-  const range=document.getElementById("rangeSel");
-  function sync(){
-    const on=!!el.value;
-    todayBtn.hidden=!on;
-    range.disabled=on;      // "Next 30 days" means nothing while on one day
-  }
-  el.onchange=()=>{ sync(); if(el.value) toast("Loading "+el.value+"…"); load(); };
-  todayBtn.onclick=()=>{ el.value=""; sync(); load(); };
-  sync();
+  el.onchange=()=>{ syncDateControls(); if(el.value) toast("Loading "+el.value+"…"); load(); };
+  document.getElementById("todayBtn").onclick=()=>{ clearViewDate(); load(); };
+  syncDateControls();
 })();
 document.getElementById("themeBtn").onclick=()=>{
   const cur=document.documentElement.getAttribute("data-theme");
