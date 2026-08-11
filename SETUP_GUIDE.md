@@ -310,6 +310,21 @@ says `not active` on a real device, the app is running desktop code
 paths — rebuild from a source tree that includes the `is_android()`
 interpreter probe.
 
+**The APK won't install — "App not installed", or a package-conflict error.**
+Android identifies an app by its package name *and* its signing key, so an
+APK signed with a different key than the one already on the phone is refused
+outright rather than treated as an update. You hit this moving between a
+self-built APK (debug-signed unless you set the `ANDROID_KEYSTORE_*`
+variables) and one downloaded from a tagged release (signed with the
+project's keystore) — in either direction.
+
+Export a bundle first (`./ourcal.py --export`), then uninstall, install the
+new APK, and paste the bundle back in. **Uninstalling deletes the app's
+private directory, so every account and token goes with it** — that is the
+whole reason to export first. Releases signed with the same keystore install
+over each other cleanly, so this is a one-time cost when the key changes,
+not something that recurs on every update.
+
 **The setup page rejects my bundle.**
 `Wrong passphrase, or the bundle was altered in transit` means exactly that,
 and the two cases are indistinguishable on purpose. Re-export and re-paste,

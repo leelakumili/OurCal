@@ -287,13 +287,43 @@ variables → Actions**:
 | `ANDROID_KEY_PASSWORD` | the key password |
 | `ANDROID_OAUTH_CLIENT` | the contents of a Desktop OAuth `credentials.json` |
 
-Generate the keystore once:
+Generate the keystore once, **outside the repository** — `*.jks` is
+git-ignored as a backstop, but a file that was never in the tree cannot be
+committed by accident:
 
 ```bash
-keytool -genkeypair -v -keystore ourcal.jks -alias ourcal \
+mkdir -p ~/OurCal-signing
+keytool -genkeypair -v -keystore ~/OurCal-signing/ourcal.jks -alias ourcal \
         -keyalg RSA -keysize 4096 -validity 10000
-base64 -i ourcal.jks | pbcopy      # paste as the ANDROID_KEYSTORE_B64 secret
+chmod 600 ~/OurCal-signing/ourcal.jks   # keytool leaves it world-readable
 ```
+
+Verify it before going near CI — this catches a mistyped password locally
+instead of costing a build to discover:
+
+```bash
+keytool -list -keystore ~/OurCal-signing/ourcal.jks -alias ourcal   # want: PrivateKeyEntry
+```
+
+**Set the secrets with `printf`, not a here-string or an interactive paste.**
+`apksigner` reads `--ks-pass env:` verbatim, so one trailing newline makes a
+correct password fail as `keystore password was incorrect` — a message that
+sends you looking for a wrong password that isn't wrong. `gh secret set X <<<
+"value"` and pasting at the interactive prompt both append one:
+
+```bash
+base64 -i ~/OurCal-signing/ourcal.jks | gh secret set ANDROID_KEYSTORE_B64
+printf '%s' 'ourcal' | gh secret set ANDROID_KEY_ALIAS
+gh secret set ANDROID_OAUTH_CLIENT < credentials.json
+read -rs "PW?keystore password: "; echo         # zsh; bash: read -rsp "..."
+printf '%s' "$PW" | gh secret set ANDROID_KEYSTORE_PASSWORD
+printf '%s' "$PW" | gh secret set ANDROID_KEY_PASSWORD
+unset PW
+```
+
+Secrets cannot be read back, so a bad value is only visible as a failed
+build. Pasting into the web UI is also fine — the field does not add a
+newline.
 
 **Back up `ourcal.jks` somewhere durable and never commit it.** This is the
 one unrecoverable mistake available in this project: losing it means no
