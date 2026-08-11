@@ -201,8 +201,9 @@ bundle in is how this route works around that.
 - **Look up any single date**, past or future, with the date picker beside the
   range dropdown — the one thing the rolling window cannot reach, since it
   always starts at the current moment. Picking a date shows that day on its
-  own; **✕ Clear** returns to the rolling agenda, and so does simply choosing
-  a range again — the dropdown stays live for exactly that reason. An event is listed when it
+  own; the **✕** button beside the date box returns to the rolling agenda, and
+  so does simply choosing a range again — the dropdown stays live for exactly
+  that reason. An event is listed when it
   *overlaps* the day, so an 11pm-to-1am meeting appears on both dates it
   touches. The stat tiles are hidden while a date is selected: every one of
   them ("meetings today", "next 7 days", "until next meeting") is measured

@@ -152,11 +152,11 @@ this feature and is unrelated to it.
 One new control in the header, beside the existing range dropdown:
 
 ```
-[ Next 30 days ▾ ]  [ 📅 dd/mm/yyyy ]  [ ✕ Clear ]  [ 🌓 ]  [ ↻ Refresh ]  [ + New event ]
+[ Next 30 days ▾ ]  [ 📅 dd/mm/yyyy ]  [ ✕ ]  [ 🌓 ]  [ ↻ Refresh ]  [ + New event ]
 ```
 
 - `<input type="date" id="dateSel">`, empty by default.
-- A **✕ Clear** button, rendered only while a date is set, that clears it.
+- A compact **✕** button, rendered only while a date is set, that clears it.
 
 ### Behaviour
 
@@ -164,7 +164,7 @@ One new control in the header, beside the existing range dropdown:
 |---|---|
 | `#dateSel` empty | Identical to today. `#rangeSel` drives the fetch; nothing changes for anyone who never touches the picker. |
 | `#dateSel` set | Fetch sends `?date=` instead of `?days=`. Agenda shows that day only. **`#rangeSel` stays enabled** — see below. |
-| **✕ Clear** clicked | `#dateSel` cleared, rolling agenda restored. |
+| **✕** clicked | `#dateSel` cleared, rolling agenda restored. |
 | A range chosen while a date is set | Clears the date and returns to the rolling agenda. |
 
 **Corrected after testing.** This first shipped with `#rangeSel` *disabled*
@@ -176,7 +176,11 @@ was a button labelled "Today", which reads as "jump to today" rather than
 "leave this view".
 
 Now there are two ways out, and the dropdown stays enabled to be one of them.
-The button is labelled **✕ Clear**.
+The button is a compact **✕**, which also keeps the header on one line: the
+day view adds two controls to a header already full at the 880px wrap, and a
+text label pushed "+ New event" onto its own row. The freshness stamp is
+hidden in day view for the same reason — it is informational, not an
+affordance.
 
 The date is **not** written to `localStorage`. `ourcal-days` persists because a
 range is a standing preference; reopening OurCal to find it pinned to a date

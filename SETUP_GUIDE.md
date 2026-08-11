@@ -326,7 +326,7 @@ over each other cleanly, so this is a one-time cost when the key changes,
 not something that recurs on every update.
 
 **I picked a date and can't get back to the normal agenda.**
-Two ways out, either works: press **✕ Clear** beside the date box, or just
+Two ways out, either works: press the **✕** button beside the date box, or just
 choose a range from the dropdown again (**Next 30 days** and the rest) — doing
 that clears the date for you. The date is never remembered between runs, so
 restarting OurCal also returns you to the rolling agenda.

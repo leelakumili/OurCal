@@ -1996,7 +1996,7 @@ PAGE = r"""<!doctype html>
       <option value="365">Next year</option>
     </select>
     <input type="date" id="dateSel" title="Show a specific date">
-    <button id="todayBtn" title="Clear the date and go back to the rolling agenda" hidden>✕ Clear</button>
+    <button class="icon-btn" id="todayBtn" title="Clear the date and go back to the rolling agenda" hidden>✕</button>
     <button class="icon-btn" id="themeBtn" title="Toggle light / dark">🌓</button>
     <button id="refreshBtn" title="Refresh now">↻ Refresh</button>
     <button class="btn-primary" id="newBtn">+ New event / Block time</button>
@@ -2197,6 +2197,11 @@ function render(){
   // they would render four confidently wrong numbers rather than an empty
   // state. Hide them instead; the day list below answers the question asked.
   const dayView=!!DATA.date;
+  // The day view adds two controls to a header that was already full at the
+  // 880px wrap, pushing "+ New event" onto its own row. The freshness stamp
+  // is the one header item that costs nothing to drop — it is informational,
+  // not an affordance, and you just chose the day you are looking at.
+  document.getElementById("stamp").hidden=dayView;
   const tilesEl=document.getElementById("tiles");
   tilesEl.hidden=dayView;
   if(dayView){
