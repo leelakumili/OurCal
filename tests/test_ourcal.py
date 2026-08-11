@@ -1861,6 +1861,70 @@ class TestClampDays(unittest.TestCase):
         self.assertEqual(ourcal.clamp_days(-5), 1)
 
 
+class TestParseViewDate(unittest.TestCase):
+    """The date view's day also comes from a URL, so it is untrusted too."""
+
+    def test_parses_an_iso_date(self):
+        self.assertEqual(ourcal.parse_view_date("2026-08-19"),
+                         datetime.date(2026, 8, 19))
+
+    def test_reaches_the_past(self):
+        self.assertEqual(ourcal.parse_view_date("2025-02-03"),
+                         datetime.date(2025, 2, 3))
+
+    def test_absent_or_empty_is_none(self):
+        # Mirrors clamp_days: a missing value means "the default view",
+        # not an error.
+        self.assertIsNone(ourcal.parse_view_date(None))
+        self.assertIsNone(ourcal.parse_view_date(""))
+
+    def test_malformed_is_none_not_an_exception(self):
+        for bad in ("banana", "2026-13-45", "19-08-2026", "2026-08",
+                    "2026-08-19T10:00", "2026-08-19 extra", []):
+            with self.subTest(bad=bad):
+                self.assertIsNone(ourcal.parse_view_date(bad))
+
+
+class TestDayWindow(unittest.TestCase):
+    """One local day, in the configured timezone."""
+
+    def setUp(self):
+        ourcal._TZ = None                       # defeat the cache per test
+        self.addCleanup(lambda: setattr(ourcal, "_TZ", None))
+
+    def _span_hours(self, on_date):
+        # Converting to UTC first is load-bearing: CPython short-circuits
+        # b - a to a naive subtraction when both share a tzinfo instance, so
+        # subtracting the bounds directly reports 24h on every date and the
+        # DST assertions below would pass against any implementation.
+        lo, hi = ourcal.day_window(on_date)
+        a = datetime.datetime.fromisoformat(lo).astimezone(datetime.timezone.utc)
+        b = datetime.datetime.fromisoformat(hi).astimezone(datetime.timezone.utc)
+        return (b - a).total_seconds() / 3600
+
+    def test_starts_at_local_midnight(self):
+        lo, hi = ourcal.day_window(datetime.date(2026, 8, 19))
+        self.assertTrue(lo.startswith("2026-08-19T00:00:00"), lo)
+        self.assertTrue(hi.startswith("2026-08-20T00:00:00"), hi)
+
+    def test_an_ordinary_day_is_24_hours(self):
+        self.assertEqual(self._span_hours(datetime.date(2026, 8, 19)), 24)
+
+    def test_spring_forward_day_is_23_hours(self):
+        # Not because +timedelta(days=1) is broken — ZoneInfo arithmetic is
+        # wall-clock and handles it. This pins the property so a later switch
+        # to naive datetimes or a fixed offset fails loudly.
+        self.assertEqual(self._span_hours(datetime.date(2026, 3, 8)), 23)
+
+    def test_fall_back_day_is_25_hours(self):
+        self.assertEqual(self._span_hours(datetime.date(2026, 11, 1)), 25)
+
+    def test_a_past_date_works_the_same(self):
+        lo, _ = ourcal.day_window(datetime.date(2025, 2, 3))
+        self.assertTrue(lo.startswith("2025-02-03T00:00:00"), lo)
+        self.assertEqual(self._span_hours(datetime.date(2025, 2, 3)), 24)
+
+
 class TestEventsWindow(unittest.TestCase):
     def setUp(self):
         os.environ["OURCAL_DEMO"] = "1"

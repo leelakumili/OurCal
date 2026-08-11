@@ -580,6 +580,63 @@ def clamp_days(days):
     return max(1, min(d, MAX_DAYS_AHEAD))
 
 
+def parse_view_date(value):
+    """A YYYY-MM-DD query value as a date, or None for anything else.
+
+    None for absent, empty, malformed, or out-of-calendar input. Mirrors
+    clamp_days: bad input degrades to the default view rather than erroring.
+    The value always arrives from a native date input in practice, so a
+    malformed one means a hand-crafted request, not a user mistake.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def day_window(on_date):
+    """(time_min, time_max) RFC3339 strings spanning on_date in TIMEZONE.
+
+    Local midnight to the next local midnight, each built from a tz()-aware
+    datetime so it carries the zone's real offset on its own date — which is
+    what makes a spring-forward day 23 hours and a fall-back day 25.
+
+    `datetime.min.time()`, not `from datetime import time`: that import would
+    shadow the `time` module this file uses for the sign-in poller.
+    """
+    midnight = datetime.min.time()
+    start = datetime.combine(on_date, midnight, tzinfo=tz())
+    end = datetime.combine(on_date + timedelta(days=1), midnight, tzinfo=tz())
+    return _iso(start), _iso(end)
+
+
+def event_on_date(ev, on_date):
+    """Does this normalized event overlap on_date, in TIMEZONE?
+
+    Overlap rather than "starts on": Google returns anything intersecting a
+    timeMin/timeMax window, and the demo path has to match that or the two
+    backends disagree about what a day contains. An 11pm-to-1am event belongs
+    to both days it touches.
+    """
+    if ev.get("allDay"):
+        # Google's all-day end is exclusive: 19th -> 20th is a single day.
+        try:
+            start = datetime.strptime(str(ev.get("start"))[:10], "%Y-%m-%d").date()
+            end = datetime.strptime(str(ev.get("end"))[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return False
+        return start <= on_date < end
+    lo, hi = day_window(on_date)
+    try:
+        start = datetime.fromisoformat(str(ev.get("start")))
+        end = datetime.fromisoformat(str(ev.get("end")))
+    except (TypeError, ValueError):
+        return False
+    return start < datetime.fromisoformat(hi) and end > datetime.fromisoformat(lo)
+
+
 def get_events(now=None, days=None):
     now = now or datetime.now(tz())
     days = clamp_days(days)
