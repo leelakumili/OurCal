@@ -325,6 +325,15 @@ whole reason to export first. Releases signed with the same keystore install
 over each other cleanly, so this is a one-time cost when the key changes,
 not something that recurs on every update.
 
+**A date I picked shows fewer events than I expected.**
+The day view fetches only that day, and lists an event when it *overlaps* the
+day — so an 11pm-to-1am meeting appears on both dates it touches, and a
+meeting that ended before midnight does not carry over. If a day looks emptier
+than it should, check the account filter chips above the agenda: they still
+apply while a date is selected, and an account switched off stays off when you
+change dates. The stat tiles disappear on purpose here — they are all measured
+from now, and only the selected day was fetched.
+
 **The setup page rejects my bundle.**
 `Wrong passphrase, or the bundle was altered in transit` means exactly that,
 and the two cases are indistinguishable on purpose. Re-export and re-paste,

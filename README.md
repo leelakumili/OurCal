@@ -198,6 +198,14 @@ bundle in is how this route works around that.
 - **Choose how far ahead you look** — 30 days by default, up to a year from the
   header. Events further out than the current window simply are not fetched, so
   a wider range costs proportionally more Google calls.
+- **Look up any single date**, past or future, with the date picker beside the
+  range dropdown — the one thing the rolling window cannot reach, since it
+  always starts at the current moment. Picking a date shows that day on its
+  own; **Today** returns to the rolling agenda. An event is listed when it
+  *overlaps* the day, so an 11pm-to-1am meeting appears on both dates it
+  touches. The stat tiles are hidden while a date is selected: every one of
+  them ("meetings today", "next 7 days", "until next meeting") is measured
+  from now, and only that one day was fetched.
 - **Stat tiles** (meetings today / next 7 days / hours in meetings / countdown),
   **per-account filter chips**, live-meeting highlighting, Join links, and a
   light/dark theme (follows your system, with a manual toggle).
