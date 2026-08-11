@@ -20,6 +20,7 @@ libraries, which OurCal installs for you on first run.
 
 ## Contents
 
+- [Demo](#demo)
 - [Try it instantly](#try-it-instantly)
 - [Install](#install)
 - [Connect your accounts](#connect-your-accounts)
@@ -29,6 +30,34 @@ libraries, which OurCal installs for you on first run.
 - [Privacy](#privacy)
 - [Contributing](#contributing)
 - [License](#license)
+
+## Demo
+
+Both clips are recorded in demo mode against built-in fixtures — every
+account, address and event in them is made up. They are scripted rather than
+screen-captured (`packaging/record-demo.py`), so re-recording after a UI
+change cannot accidentally put a real calendar on the internet.
+
+**On a Mac** — the unified agenda, widening the range to three months,
+creating an event across accounts, then syncing, editing and deleting a row
+at its source:
+
+![OurCal on macOS](docs/demo/ourcal-desktop.gif)
+
+*[Full quality (MP4)](docs/demo/ourcal-desktop.mp4)*
+
+**At phone width** — the same interface narrow, where each row's actions move
+to their own line, and the **Set up this device** page that adds an account or
+imports a bundle:
+
+![The OurCal interface at phone width](docs/demo/ourcal-phone.gif)
+
+*[Full quality (MP4)](docs/demo/ourcal-phone.mp4)*
+
+> This second clip is the interface at a phone's width, not a recording of
+> the Android app. Installing the APK, getting past Play Protect and signing
+> in to Google on the device are covered in [Install](#as-an-android-app) and
+> the [setup guide](SETUP_GUIDE.md#on-android-sign-in-on-the-device).
 
 ## Try it instantly
 
@@ -243,6 +272,7 @@ against in-memory fixtures.
 | Run the tests | `python3 -m unittest discover tests -q` |
 | Build the Mac app + `.dmg` | `./packaging/build-app.sh` |
 | Build the Android `.apk` | `./packaging/build-android.sh` |
+| Re-record the README demos | `python3 packaging/record-demo.py` |
 
 The whole application is one file, `ourcal.py`, with the interface embedded as
 an HTML/CSS/JS string. That is deliberate — see [Contributing](#contributing).
